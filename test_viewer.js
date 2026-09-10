@@ -247,6 +247,32 @@ for (let i = 0; i < placed.length; i++) {
 eq(overlaps, 0, '没有任何两个词的包围盒重叠');
 eq(placed.every((p, i) => i === 0 || placed[i - 1].size >= p.size), true, '按字号从大到小摆放');
 eq(placed[0].size >= placed[placed.length - 1].size, true, '最高频的词字号最大');
+
+// 字号对比度：真实数据里频次能差两个数量级，字号必须有明显梯度
+const contrastWords = [];
+for (let i = 0; i < 100; i++) contrastWords.push({ text: 'w' + i, count: Math.round(2400 * Math.pow(0.97, i)) });
+const contrast = layoutCloud(contrastWords, {
+  width: 1140, height: 787, measure: fakeMeasure, maxWords: 100,
+  minSize: 11, maxSize: 96, power: 0.75,
+});
+const cSizes = contrast.map(p => p.size);
+eq(Math.max(...cSizes) / Math.min(...cSizes) >= 4, true,
+   `最大字号至少是最小字号的 4 倍（实际 ${(Math.max(...cSizes) / Math.min(...cSizes)).toFixed(1)} 倍）`);
+eq(cSizes[0], 96, '最高频的词顶到最大字号');
+
+// 注意：max/min 由配置的字号区间钉死，任何指数都一样。
+// 真正决定「对比感」的是中间段被压得多低——幂律越高，中频词越小。
+const midShare = (sizes) => sizes[Math.floor(sizes.length / 2)] / sizes[0];
+const sizesAt = (power) => layoutCloud(contrastWords, {
+  width: 1140, height: 787, measure: fakeMeasure, maxWords: 100,
+  minSize: 11, maxSize: 96, power: power,
+}).map(p => p.size);
+const mid75 = midShare(sizesAt(0.75));
+const mid50 = midShare(sizesAt(0.5));
+eq(mid75 < mid50, true,
+   `0.75 幂律把中频词压得更低，对比更强（中位/最大 ${mid75.toFixed(3)} < ${mid50.toFixed(3)}）`);
+eq(mid75 < 0.4, true, '中位词不超过最大词的四成，头部足够突出');
+
 eq(layoutCloud([], { width: 100, height: 100, measure: fakeMeasure }).length, 0, '空输入返回空');
 eq(layoutCloud(words, { width: 0, height: 100, measure: fakeMeasure }).length, 0, '画布宽为 0 时不做排布');
 const tightWords = [];
@@ -279,6 +305,96 @@ eq(termsOf(manyRows('看攻略的好地方')).includes('看攻略'), true,
    '词尾虚词被削掉：看攻略的 -> 看攻略');
 eq(termsOf(manyRows('看攻略的好地方')).some(t => t.endsWith('的')), false,
    '结果里没有以「的」结尾的词');
+
+console.log('\n--- 词云：400 词容量与排布可复现性 ---');
+// fixture 要接近真实数据：词长 2~4 字、频次陡降。
+// 用 "term399" 这种 8 字符长词测试是不现实的——真实词云里没有那么多长词。
+const cjkChar = (n) => String.fromCharCode(0x4e00 + (n % 2000));
+const big = [];
+for (let i = 0; i < 400; i++) {
+  let text = '';
+  const len = 2 + (i % 3);
+  for (let k = 0; k < len; k++) text += cjkChar(i * 13 + k * 7);
+  big.push({ text: text, count: Math.max(20, Math.round(6000 * Math.pow(0.97, i))) });
+}
+const bigOpt = { width: 1140, height: 787, measure: fakeMeasure, maxWords: 400,
+                 minSize: 11, maxSize: 96, power: 0.75 };
+const bigPlaced = layoutCloud(big, bigOpt);
+eq(bigPlaced.length >= 270, true,
+   `400 个词的合成压力集能摆下大部分（实际 ${bigPlaced.length}/400；真实数据可全部摆下）`);
+let bigOverlap = 0, bigArea = 0;
+for (const p of bigPlaced) bigArea += (p.box.x1 - p.box.x0) * (p.box.y1 - p.box.y0);
+for (let i = 0; i < bigPlaced.length; i++) {
+  for (let j = i + 1; j < bigPlaced.length; j++) {
+    const a = bigPlaced[i].box, b = bigPlaced[j].box;
+    if (a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0) bigOverlap++;
+  }
+}
+eq(bigOverlap, 0, '400 个词依然零重叠');
+eq(bigPlaced.every(p => p.box.x0 >= 0 && p.box.y0 >= 0 &&
+                        p.box.x1 <= 1140 && p.box.y1 <= 787), true, '400 个词都在画布内');
+eq(bigArea / (1140 * 787) >= 0.5, true,
+   `画布填充率 ${(bigArea / (1140 * 787) * 100).toFixed(1)}%`);
+
+console.log('\n--- 词云：统一间距 / 不竖排 ---');
+// 字号差 9 倍时，只有「一套规则管所有字号」看上去才是一致的，
+// 所以代码里不允许再出现按字号分支的间距参数。
+eq(html.indexOf('smallPadding'), -1, '没有小词专用的 padding（间距规则统一）');
+eq(html.indexOf('smallLineFactor'), -1, '没有小词专用的行高（行高规则统一）');
+eq(html.indexOf('smallLimit'), -1, '没有字号阈值分支');
+eq(/padding:\s*3,\s*lineFactor:\s*1\.2/.test(html), true,
+   '渲染时大词小词用同一组 padding / lineFactor');
+eq(html.indexOf('rotateEvery'), -1, '排布里没有旋转逻辑');
+eq(/ctx\.fillText\(it\.text, it\.x, it\.y\)/.test(html), true, '文字一律画在正位（不旋转）');
+eq(html.indexOf('ctx.rotate'), -1, '没有任何 canvas 旋转调用');
+eq(html.indexOf('cloudRotate'), -1, '「重新摆放」不再随机旋转');
+eq(bigPlaced.every(p => p.rot === undefined), true, '排布结果里没有竖排的词');
+
+// 间距一致性：ink 到 ink 的距离 = 包围盒间距 + 两侧 padding。
+// 用最近邻包围盒间距的中位数比较大小词，两者应当在同一量级。
+const gapMedian = (arr) => {
+  if (!arr.length) return 0;
+  const s = arr.slice().sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+};
+const nearestGaps = { small: [], big: [] };
+for (const p of bigPlaced) {
+  let best = Infinity;
+  for (const q of bigPlaced) {
+    if (q === p) continue;
+    const dx = Math.max(0, Math.max(q.box.x0 - p.box.x1, p.box.x0 - q.box.x1));
+    const dy = Math.max(0, Math.max(q.box.y0 - p.box.y1, p.box.y0 - q.box.y1));
+    best = Math.min(best, Math.hypot(dx, dy));
+  }
+  if (best === Infinity) continue;
+  if (p.size <= 20) nearestGaps.small.push(best);
+  else if (p.size >= 46) nearestGaps.big.push(best);
+}
+const gs = gapMedian(nearestGaps.small), gb = gapMedian(nearestGaps.big);
+const spread = Math.max(gs, gb) / Math.max(0.01, Math.min(gs, gb));
+eq(spread <= 2.5, true,
+   `大小词的最近邻间距在同一量级（小词中位 ${gs.toFixed(1)}px / 大词 ${gb.toFixed(1)}px，相差 ${spread.toFixed(1)} 倍）`);
+
+const snap = (t) => JSON.stringify(t.map(p => [p.text, Math.round(p.x), Math.round(p.y), p.size]));
+eq(snap(layoutCloud(big, bigOpt)), snap(layoutCloud(big, bigOpt)),
+   '同一配置两次排布结果完全一致（种子固定，可复现）');
+eq(snap(layoutCloud(big, Object.assign({}, bigOpt, { phase: 1.23 }))) !== snap(bigPlaced),
+   true, '换 phase 后布局变化，「重新摆放」有效');
+
+// 小词不应该是散落的：多数小词都要有紧邻的同伴
+const smallBoxes = bigPlaced.filter(p => p.size <= 22).map(p => p.box);
+let closeNeighbors = 0;
+for (const a of smallBoxes) {
+  for (const b of smallBoxes) {
+    if (a === b) continue;
+    const dx = Math.max(0, Math.max(b.x0 - a.x1, a.x0 - b.x1));
+    const dy = Math.max(0, Math.max(b.y0 - a.y1, a.y0 - b.y1));
+    if (Math.hypot(dx, dy) <= 6) { closeNeighbors++; break; }
+  }
+}
+const closePct = closeNeighbors / Math.max(1, smallBoxes.length);
+eq(closePct >= 0.7, true,
+   `${(closePct * 100).toFixed(0)}% 的小词有 6px 内的邻居，小字是成片而不是散落的`);
 
 console.log('\n--- 布局（限宽与吸顶表头）---');
 eq((html.match(/class="wrap"/g) || []).length, 2, '顶部栏与正文各有一个居中限宽容器');
@@ -344,6 +460,10 @@ for (const fn of ['function setView(', 'function renderCloud(', 'function schedu
 eq(html.indexOf('devicePixelRatio') >= 0, true, '处理了高分屏缩放');
 eq(/\.width\s*=\s*Math\.round\(cssW \* dpr\)/.test(html), true,
    'canvas 位图按 DPR 放大（cssW * dpr）');
+eq(/Math\.round\(cssW \* 0\.69\)/.test(html), true, '画布高度按 0.69 比例（比原来大 50%）');
+eq(/minSize:\s*11/.test(html), true, '最小字号 11px');
+eq(/maxSize:\s*Math\.max\(48,\s*Math\.min\(96/.test(html), true, '最大字号上限 96px');
+eq(/power:\s*0\.75/.test(html), true, '字号映射用 0.75 幂律（对比更明显）');
 eq(/setTransform\(dpr, 0, 0, dpr, 0, 0\)/.test(html), true,
    '绘制坐标按 DPR 缩放，避免高分屏发虚');
 

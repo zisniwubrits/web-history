@@ -1542,8 +1542,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     </span>
     <select id="cloudTop" title="显示多少个词">
       <option value="50">前 50 个词</option>
-      <option value="100" selected>前 100 个词</option>
-      <option value="200">前 200 个词</option>
+      <option value="100">前 100 个词</option>
+      <option value="200" selected>前 200 个词</option>
+      <option value="400">前 400 个词</option>
     </select>
     <button id="cloudRedraw" type="button">重新摆放</button>
     <span class="hint" id="cloudHint"></span>
@@ -1591,8 +1592,8 @@ const chipsEl   = document.getElementById('chips');
 
 // 当前筛选条件，UI 永远从这里读、往这里写
 const state = { q:'', browser:'', time:'all', day:'', from:'', to:'', useRegex:false,
-                view:'list', cloudSource:'title', cloudTop:100,
-                cloudPhase:0, cloudRotate:3 };
+                view:'list', cloudSource:'title', cloudTop:200,
+                cloudPhase:0 };
 let filtered = DATA, shown = 0, currentMatcher = null;
 
 // ==========================================================================
@@ -1874,62 +1875,133 @@ function topTerms(counts, limit){
   return limit ? arr.slice(0, limit) : arr;
 }
 
-// 词云排布：从中心向外沿螺线找空位，放不下就跳过。
-// measure(text, size) 由调用方注入，这样这个函数不依赖 canvas，可以单独测。
+// 可复现的伪随机数：同一个词、同一轮重排，结果稳定
+function seededRandom(seed){
+  let s = seed >>> 0;
+  return function(){
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// 均匀网格索引：把已放置的包围盒按格子分桶，碰撞检测只查相邻格子。
+// 没有它的话，几百个词时每个候选点都要跟所有已放置的词比一遍，会卡到不能用。
+function makeGrid(width, height, cell){
+  const cols = Math.max(1, Math.ceil(width / cell) + 1);
+  const rows = Math.max(1, Math.ceil(height / cell) + 1);
+  const buckets = new Map();
+  const clampCell = (v, max) => Math.max(0, Math.min(max - 1, Math.floor(v / cell)));
+  const spans = (box) => ({
+    c0: clampCell(box.x0, cols), c1: clampCell(box.x1, cols),
+    r0: clampCell(box.y0, rows), r1: clampCell(box.y1, rows),
+  });
+  return {
+    insert(box){
+      const s = spans(box);
+      for (let r = s.r0; r <= s.r1; r++) {
+        for (let c = s.c0; c <= s.c1; c++) {
+          const k = r * cols + c;
+          const arr = buckets.get(k);
+          if (arr) arr.push(box); else buckets.set(k, [box]);
+        }
+      }
+    },
+    hits(box){
+      const s = spans(box);
+      for (let r = s.r0; r <= s.r1; r++) {
+        for (let c = s.c0; c <= s.c1; c++) {
+          const arr = buckets.get(r * cols + c);
+          if (!arr) continue;
+          for (let i = 0; i < arr.length; i++) {
+            const b = arr[i];
+            if (box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0) {
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    },
+  };
+}
+
+// 词云排布：先沿螺线从中心向外找空位（大字自然居中），
+// 螺线找不到的再随机撒点补位（把边缘的空隙填密）。
+// measure(text, size) 由调用方注入，所以这个函数不依赖 canvas，可以单独测。
 function layoutCloud(terms, opts){
   const o = Object.assign({
-    width: 1000, height: 520, minSize: 13, maxSize: 56,
-    padding: 3, maxWords: 100, measure: (t, s) => t.length * s * 0.62,
-    rotateEvery: 3, phase: 0,
+    width: 1000, height: 520, minSize: 11, maxSize: 96,
+    // 大词小词用同一套间距规则：字号差 9 倍时，统一规则看上去才是一致的
+    padding: 3, lineFactor: 1.2,
+    maxWords: 100, measure: (t, s) => t.length * s * 0.62,
+    phase: 0, cell: 36,
+    spiralSteps: 2600, spiralDr: 1.5, spiralDa: 0.32,
+    fallbackTries: 2000, fallback: true,
   }, opts || {});
 
   const placed = [];
   if (!terms.length || o.width <= 0 || o.height <= 0) return placed;
 
   const list = terms.slice(0, o.maxWords);
-  const maxC = list[0].count;
-  const minC = list[list.length - 1].count;
-  const sMax = Math.sqrt(maxC), sMin = Math.sqrt(minC);
-  const span = sMax - sMin;
+  const maxC = Math.max(1, list[0].count);
+  const minC = Math.max(1, list[list.length - 1].count);
+  // 字号映射：按频次的比值做幂律缩放。
+  // 指数 0.5（也就是开方）会把中频词抬得很高、压缩差距；
+  // 指数 1（线性）又会让长尾全挤到最小号。0.75 是比较均衡的强对比档。
+  const power = o.power === undefined ? 0.75 : o.power;
+  const base = Math.pow(Math.min(1, minC / maxC), power);
+  const denom = 1 - base;
 
-  const boxes = [];
+  const grid = makeGrid(o.width, o.height, o.cell);
   const cx = o.width / 2, cy = o.height / 2;
-  const pad = o.padding;
 
   for (let idx = 0; idx < list.length; idx++) {
     const term = list[idx];
-    const t = span > 0 ? (Math.sqrt(term.count) - sMin) / span : 1;
+    const r = Math.pow(Math.min(1, term.count / maxC), power);
+    const t = denom > 0 ? (r - base) / denom : 1;
     const size = Math.round(o.minSize + t * (o.maxSize - o.minSize));
     const textW = Math.max(1, o.measure(term.text, size));
-    const textH = size * 1.2;
-    // 每 rotateEvery 个词允许竖排一个，让画面不至于全是横条
-    const rotations = (o.rotateEvery > 0 && idx % o.rotateEvery === o.rotateEvery - 1)
-      ? [0, 90] : [0];
+    const textH = size * o.lineFactor;
+    const pad = o.padding;
+
+    // 所有词一律横排：竖排的字读起来费劲，这里不做
+    const boxAt = (x, y) => {
+      const box = { x0: x - textW / 2 - pad, y0: y - textH / 2 - pad,
+                    x1: x + textW / 2 + pad, y1: y + textH / 2 + pad };
+      if (box.x0 < 0 || box.y0 < 0 || box.x1 > o.width || box.y1 > o.height) return null;
+      return grid.hits(box) ? null : box;
+    };
 
     let hit = null;
-    for (let step = 0; step < 2600 && !hit; step++) {
-      const angle = o.phase + step * 0.32;
-      const r = 1.5 * angle;
-      const x = cx + r * Math.cos(angle);
-      const y = cy + r * Math.sin(angle) * 0.62;   // 竖向压扁，贴合宽扁的画布
-      for (const rot of rotations) {
-        const halfW = (rot ? textH : textW) / 2 + pad;
-        const halfH = (rot ? textW : textH) / 2 + pad;
-        const box = { x0: x - halfW, y0: y - halfH, x1: x + halfW, y1: y + halfH };
-        if (box.x0 < 0 || box.y0 < 0 || box.x1 > o.width || box.y1 > o.height) continue;
-        let clash = false;
-        for (const b of boxes) {
-          if (box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0) {
-            clash = true; break;
-          }
-        }
-        if (clash) continue;
-        hit = { text: term.text, count: term.count, size: size,
-                x: x, y: y, rot: rot, box: box, rank: idx };
-        break;
+    for (let step = 0; step < o.spiralSteps && !hit; step++) {
+      const angle = o.phase + step * o.spiralDa;
+      const rr = o.spiralDr * angle;
+      const x = cx + rr * Math.cos(angle);
+      const y = cy + rr * Math.sin(angle) * 0.62;   // 竖向压扁，贴合宽扁的画布
+      const box = boxAt(x, y);
+      if (box) hit = { text: term.text, count: term.count, size: size,
+                       x: x, y: y, box: box, rank: idx };
+    }
+
+    // 螺线在大半径处的采样点间距会拉开到上百像素，边缘的小空隙全靠这一步填。
+    // tries 调小一点，免得外围被塞得过满。
+    if (!hit && o.fallback) {
+      const seed = (0x9e3779b9 ^ Math.imul(idx + 1, 2654435761)
+                    ^ Math.round(o.phase * 1e6)) >>> 0;
+      const rnd = seededRandom(seed);
+      for (let k = 0; k < o.fallbackTries && !hit; k++) {
+        const x = o.width * rnd();
+        const y = o.height * rnd();
+        const box = boxAt(x, y);
+        if (box) hit = { text: term.text, count: term.count, size: size,
+                         x: x, y: y, box: box, rank: idx };
       }
     }
-    if (hit) { placed.push(hit); boxes.push(hit.box); }
+
+    if (hit) { placed.push(hit); grid.insert(hit.box); }
   }
   return placed;
 }
@@ -2197,7 +2269,8 @@ function renderCloud(){
   if (state.view !== 'cloud') return;
 
   const cssW = Math.max(320, cloudWrap.clientWidth || 1000);
-  const cssH = Math.max(300, Math.min(620, Math.round(cssW * 0.46)));
+  // 画布高度按 1.5 倍放大（0.46 -> 0.69），配合放大的字号差距
+  const cssH = Math.max(450, Math.min(930, Math.round(cssW * 0.69)));
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   cloud.width = Math.round(cssW * dpr);
   cloud.height = Math.round(cssH * dpr);
@@ -2206,27 +2279,27 @@ function renderCloud(){
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
 
+  // 词多了就放宽 n-gram 的频次门槛，否则凑不满 400 个词
   const counts = extractTerms(filtered, state.cloudSource,
-                              state.cloudTop >= 200 ? 4 : 3);
+                              state.cloudTop >= 400 ? 2 : 3);
   const terms = topTerms(counts, state.cloudTop);
   cloudItems = layoutCloud(terms, {
-    width: cssW, height: cssH, measure: measureTerm, padding: 3,
-    minSize: 13, maxSize: Math.max(26, Math.min(54, Math.round(cssH / 9))),
-    maxWords: state.cloudTop,
-    phase: state.cloudPhase, rotateEvery: state.cloudRotate,
+    width: cssW, height: cssH, measure: measureTerm,
+    // 大词小词同一套间距，字号差 9 倍时看上去才一致
+    padding: 3, lineFactor: 1.2,
+    // 字号跨度从 13~54 拉到 11~96，最大词与最小词差约 9 倍
+    minSize: 11, maxSize: Math.max(48, Math.min(96, Math.round(cssH / 8))),
+    power: 0.75, maxWords: state.cloudTop,
+    phase: state.cloudPhase,
   });
 
   const total = cloudItems.length;
   for (const it of cloudItems) {
-    ctx.save();
-    ctx.translate(it.x, it.y);
-    if (it.rot) ctx.rotate(-Math.PI / 2);
     ctx.font = '600 ' + it.size + 'px ' + CLOUD_FONT;
     ctx.fillStyle = cloudColor(it.rank, total);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(it.text, 0, 0);
-    ctx.restore();
+    ctx.fillText(it.text, it.x, it.y);   // 一律横排，不做旋转
   }
 
   const dropped = terms.length - total;
@@ -2307,8 +2380,7 @@ cloudTop.addEventListener('change', () => {
   renderCloud();
 });
 cloudRedraw.addEventListener('click', () => {
-  state.cloudPhase = Math.random() * Math.PI * 2;
-  state.cloudRotate = 2 + Math.floor(Math.random() * 3);
+  state.cloudPhase = Math.random() * Math.PI * 2;   // 换个螺旋起点重排
   renderCloud();
 });
 
