@@ -1272,85 +1272,172 @@ HTML_TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>浏览历史归档</title>
 <style>
-  :root { color-scheme: light dark;
-          --maxw: 1180px;        /* 内容最大宽度，宽屏下不再拉满 */
-          --pad: 20px;           /* 左右留白 */
-          --headh: 0px;          /* 顶部筛选栏实测高度，由 JS 回填 */ }
+  /* ======================================================================
+     配色与排版令牌取自 DSH Web GUI 的暗色主题（--dsw-static-* / --dsw-alias-* /
+     --dsw-font-* / --dsl-*-radius），左侧注释标明对应关系，方便将来重新对齐。
+     ====================================================================== */
+  :root {
+    color-scheme: dark;
+
+    /* 背景层（DSH: bg-base / bg-layer-1..3） */
+    --bg-base:    #151517;
+    --bg-layer-1: #232324;
+    --bg-layer-2: #2c2c2e;
+    --bg-layer-3: #353638;
+
+    /* 描边（DSH: border-l1 / l2 / l3） */
+    --border-l1: #ffffff0f;
+    --border-l2: #ffffff1f;
+    --border-l3: #ffffff29;
+
+    /* 文字（DSH: label-primary / secondary / tertiary / caption） */
+    --label-primary:   #f9fafb;
+    --label-secondary: #cfd3d6;
+    --label-tertiary:  #adb2b8;
+    --label-caption:   #81858c;
+    --on-light:        #0f1115;
+
+    /* 交互态（DSH: interactive-bg-hover / active） */
+    --hover:  #ffffff14;
+    --active: #ffffff24;
+
+    /* 强调与状态色（DSH: static-blue-450 / deepseek-450 / red-400 / amber-500 / amber-400） */
+    --accent:        #4d93f8;
+    --accent-strong: #5686fe;
+    --danger:        #f25a5a;
+    --warn:          #f59e0b;
+    --warn-text:     #f7ad31;
+
+    /* 字体（DSH: --dsw-font-family / --ds-font-family-code） */
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+                 Helvetica, Arial, sans-serif;
+    --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas,
+                 "Liberation Mono", Menlo, Courier, "PingFang SC", "Microsoft YaHei";
+
+    /* 圆角与动效（DSH: 输入框 8px / 卡片 12px / 按钮胶囊 18px；--ds-ease-in-out） */
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-pill: 18px;
+    --dur: .2s;
+    --ease: cubic-bezier(.4, 0, .2, 1);
+
+    /* 布局 */
+    --maxw: 1180px;
+    --pad: 20px;
+    --headh: 0px;          /* 顶部筛选栏实测高度，由 JS 回填 */
+  }
   * { box-sizing: border-box; }
   [hidden] { display:none !important; }
-  body { margin:0; font: 14px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
-         background:#0f1115; color:#e6e8ee; }
+  body { margin:0; background:var(--bg-base); color:var(--label-primary);
+         font:14px/22px var(--font-sans);
+         -webkit-font-smoothing:antialiased; }
+
+  /* DSH 的滚动条：8px 宽、圆角、hover 变亮 */
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-thumb { background:#3c3c3d; border-radius:4px; }
+  ::-webkit-scrollbar-thumb:hover { background:#65676b; }
+  ::-webkit-scrollbar-track { background:transparent; }
+
   /* 居中限宽容器：背景仍然通栏，内容收在中间 */
   .wrap { max-width:var(--maxw); margin:0 auto; padding:0 var(--pad); }
-  header { position:sticky; top:0; z-index:5; background:#161a22;
-           border-bottom:1px solid #262c38; padding:12px 0; }
-  header .wrap { display:flex; flex-direction:column; gap:0; }
-  h1 { margin:0 0 10px; font-size:16px; font-weight:600; letter-spacing:.3px;
+
+  header { position:sticky; top:0; z-index:5; background:var(--bg-base);
+           border-bottom:1px solid var(--border-l1); padding:14px 0 12px; }
+  header .wrap { display:flex; flex-direction:column; }
+  h1 { margin:0 0 12px; font-size:16px; line-height:24px; font-weight:600;
        display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
-  h1 .count { font-size:12px; font-weight:400; color:#7c869a; }
-  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-  input, select { background:#0f1115; color:#e6e8ee; border:1px solid #2c3342;
-                  border-radius:8px; padding:7px 10px; font-size:13px; }
-  input:focus, select:focus { outline:none; border-color:#3d6fd0; }
+  h1 .count { font-size:13px; line-height:20px; font-weight:400;
+              color:var(--label-caption); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+
+  /* 输入框：对齐 DSH 的 32px 高 + 8px 圆角 + layer-1 底色 */
+  input, select { height:32px; padding:0 10px; font:14px/22px var(--font-sans);
+                  color:var(--label-primary); background:var(--bg-layer-1);
+                  border:1px solid var(--border-l2); border-radius:var(--radius-sm);
+                  transition:border-color var(--dur) var(--ease),
+                             background-color var(--dur) var(--ease); }
+  input:hover, select:hover { background:var(--bg-layer-2); }
+  input:focus, select:focus { outline:none; border-color:var(--accent); }
   input#q { flex:1 1 240px; min-width:180px; }
-  input#q.invalid { border-color:#c2453f; }
-  button { background:#0f1115; color:#e6e8ee; border:1px solid #2c3342;
-           border-radius:8px; padding:7px 12px; font-size:13px; cursor:pointer; }
-  button:hover { background:#1a1f2a; }
-  /* 正则开关：开启后高亮，一眼能看出现在是正则模式 */
-  .toggle { font-family:Consolas,monospace; font-size:14px; letter-spacing:1px;
-            padding:6px 11px; }
-  .toggle.on { background:#1d3a70; border-color:#3d6fd0; color:#cfe0ff; }
-  .err { margin-top:8px; padding:7px 10px; border-radius:8px; font-size:12px;
-         background:#33191b; border:1px solid #5c2a2c; color:#ffb4ae; }
-  mark { background:#4a3a10; color:#ffe08a; border-radius:3px; padding:0 1px; }
+  input#q.invalid { border-color:var(--danger); }
+  input[type=date] { color-scheme:dark; }
+
+  /* 按钮：DSH 的胶囊形（18px 圆角、36px 高，这里压到 32px 与输入框齐平） */
+  button { height:32px; padding:0 14px; font:14px/22px var(--font-sans);
+           color:var(--label-primary); background:transparent;
+           border:1px solid var(--border-l2); border-radius:var(--radius-pill);
+           cursor:pointer; white-space:nowrap;
+           transition:background-color var(--dur) var(--ease),
+                      border-color var(--dur) var(--ease),
+                      color var(--dur) var(--ease); }
+  button:hover { background:var(--hover); }
+  button:active { background:var(--active); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+
+  /* 正则开关：选中态用 DSH 的 ghost-active（layer-3 填充 + 1px 内描边） */
+  .toggle { font-family:var(--font-mono); letter-spacing:1px; padding:0 12px; }
+  .toggle.on { color:var(--accent); background:var(--bg-layer-3);
+               box-shadow:inset 0 0 0 1px var(--border-l3); }
+
+  .err { margin-top:10px; padding:8px 12px; border-radius:var(--radius-sm);
+         font-size:13px; line-height:20px;
+         background:#f25a5a24; border:1px solid #f25a5a66; color:var(--danger); }
+  mark { background:#f59e0b3d; color:var(--warn-text);
+         border-radius:3px; padding:0 1px; }
 
   /* ---- 时间条件区：选了「指定某一天 / 自定义范围」才出现 ---- */
-  .cond { margin-top:8px; padding:8px 10px; border-radius:8px;
-          background:#12161d; border:1px solid #232936; }
-  .condLabel { color:#98a2b5; font-size:12px; }
-  .cond input[type=date] { padding:5px 8px; }
-  .hint { color:#6f7a8d; font-size:12px; }
+  .cond { margin-top:10px; padding:10px 12px; border-radius:var(--radius-sm);
+          background:var(--bg-layer-1); border:1px solid var(--border-l1); }
+  .condLabel { color:var(--label-secondary); font-size:13px; line-height:20px; }
+  .hint { color:var(--label-caption); font-size:13px; line-height:20px; }
 
-  /* ---- 已生效的筛选条件 ---- */
-  .chips { margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px;
-          background:#1b2231; border:1px solid #2c3342; color:#cfd6e4;
-          border-radius:999px; padding:3px 6px 3px 10px; }
-  .chip b { font-weight:600; color:#e6e8ee; }
-  .chip button { border:none; background:transparent; color:#7c869a; padding:0 4px;
-                 font-size:14px; line-height:1; border-radius:999px; }
-  .chip button:hover { background:#2c3342; color:#e6e8ee; }
-  .stat { color:#8b95a7; font-size:12px; margin-top:8px; }
+  /* ---- 已生效的筛选条件：DSH 的 pill（24px 高 / 12px 圆角）---- */
+  .chips { margin-top:10px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .chip { display:inline-flex; align-items:center; gap:6px; height:24px;
+          padding:0 6px 0 10px; font-size:12px; line-height:18px;
+          color:var(--label-secondary); background:var(--bg-layer-2);
+          border:1px solid var(--border-l1); border-radius:var(--radius-md); }
+  .chip b { font-weight:500; color:var(--label-primary); }
+  .chip button { height:18px; width:18px; padding:0; font-size:13px; line-height:1;
+                 color:var(--label-caption); background:transparent; border:none;
+                 border-radius:50%; }
+  .chip button:hover { background:var(--hover); color:var(--label-primary); }
+  .stat { color:var(--label-caption); font-size:13px; line-height:20px; margin-top:10px; }
 
   table { width:100%; border-collapse:collapse; table-layout:fixed; }
-  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #1e232d;
+  th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border-l1);
            vertical-align:top; }
   /* top 用实测的筛选栏高度，否则表头会被顶部栏挡住 */
-  th { position:sticky; top:var(--headh); background:#12161d; color:#98a2b5;
-       font-weight:600; font-size:12px; z-index:4;
-       border-bottom:1px solid #262c38; }
-  tr:hover td { background:#151a23; }
-  td.time { white-space:nowrap; color:#8b95a7; font-variant-numeric:tabular-nums; }
-  td.br { color:#7c869a; font-size:12px; word-break:break-word; }
-  td.empty { padding:38px 10px; text-align:center; color:#7c869a; }
+  th { position:sticky; top:var(--headh); z-index:4; background:var(--bg-base);
+       color:var(--label-caption); font-size:12px; line-height:18px; font-weight:500;
+       border-bottom:1px solid var(--border-l2); }
+  tbody tr { transition:background-color var(--dur) var(--ease); }
+  tbody tr:hover { background:var(--hover); }
+  td.time { white-space:nowrap; color:var(--label-tertiary); font-size:13px;
+            font-variant-numeric:tabular-nums; }
+  td.br { color:var(--label-caption); font-size:13px; word-break:break-word; }
+  td.empty { padding:44px 12px; text-align:center; color:var(--label-caption); }
   td.empty button { margin-left:8px; }
-  a { color:#69a7ff; text-decoration:none; word-break:break-all; }
+  a { color:var(--accent); text-decoration:none; word-break:break-all; }
   a:hover { text-decoration:underline; }
-  .title { color:#cfd6e4; }
-  .host { color:#6f7a8d; font-size:12px; }
-  #more { margin:18px auto 40px; display:block; padding:9px 20px; border-radius:8px;
-          border:1px solid #2c3342; background:#1a1f2a; color:#cfd6e4; cursor:pointer; }
-  #more:hover { background:#222836; }
+  .title { color:var(--label-primary); }
+  .host { color:var(--label-caption); font-size:12px; line-height:18px; }
+
+  /* 主按钮：DSH 的 primary（浅底深字），用在「加载更多」上 */
+  #more { display:block; margin:20px auto 48px; height:36px; padding:0 20px;
+          color:var(--on-light); background:var(--label-primary);
+          border-color:transparent; font-weight:500; }
+  #more:hover { background:#ebeef2; }
 
   /* 窄屏：收紧留白，并让固定列让出空间 */
   @media (max-width: 860px) {
     :root { --pad: 12px; }
-    th, td { padding:7px 8px; }
+    h1, td, td.br, td.time { font-size:13px; }
+    th, td { padding:8px 8px; }
     th:nth-child(1), td:nth-child(1) { width:104px !important; }
     th:nth-child(2), td:nth-child(2) { width:84px !important; }
     th:nth-child(4), td:nth-child(4) { width:78px !important; }
-    h1 { font-size:15px; }
   }
 </style>
 </head>

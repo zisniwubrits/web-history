@@ -188,5 +188,40 @@ eq(html.indexOf('@media') >= 0, true, '有窄屏适配');
 eq(/td\.br\s*{[^}]*word-break/.test(html), true, '浏览器列允许换行，不会撑宽表格');
 eq(/td\.br\s*{[^}]*white-space:\s*nowrap/.test(html), false, '浏览器列不再强制不换行');
 
+console.log('\n--- 主题令牌（对齐 DSH 暗色主题）---');
+const DSH = {
+  '#151517': 'bg-base',
+  '#232324': 'bg-layer-1',
+  '#2c2c2e': 'bg-layer-2',
+  '#353638': 'bg-layer-3',
+  '#f9fafb': 'label-primary',
+  '#cfd3d6': 'label-secondary',
+  '#adb2b8': 'label-tertiary',
+  '#81858c': 'label-caption',
+  '#4d93f8': 'accent (static-blue-450)',
+  '#f25a5a': 'danger (static-red-400)',
+  '#f59e0b': 'warn (static-amber-500)',
+  '#ffffff1f': 'border-l2',
+  '#ffffff29': 'border-l3',
+};
+for (const [hex, name] of Object.entries(DSH)) {
+  eq(html.indexOf(hex) >= 0, true, `含 DSH 令牌色 ${name} ${hex}`);
+}
+eq(/--radius-pill:\s*18px/.test(html), true, '按钮胶囊圆角 18px（DSH 按钮规范）');
+eq(/--radius-md:\s*12px/.test(html), true, '12px 圆角（DSL 卡片规范）');
+eq(/--radius-sm:\s*8px/.test(html), true, '8px 圆角（DSH 输入框规范）');
+eq(html.indexOf('PingFang SC') >= 0, true, '字体栈含 PingFang SC');
+eq(html.indexOf('JetBrains Mono') >= 0, true, '等宽字体栈含 JetBrains Mono');
+eq(/cubic-bezier\(\.4,\s*0,\s*\.2,\s*1\)/.test(html), true,
+   '动效曲线用 DSH 的 --ds-ease-in-out');
+
+// 旧配色必须清干净，避免两套色系混用
+for (const stale of ['#161a22', '#69a7ff', '#262c38', '#1e232d', '#98a2b5',
+                     '#8b95a7', '#2c3342', '#12161d', '#1d3a70', '#cfe0ff']) {
+  eq(html.indexOf(stale), -1, `旧配色已清除: ${stale}`);
+}
+eq(html.indexOf('color-mix('), -1, '没有用 color-mix（改用与 DSH 一致的 8 位 hex 透明度）');
+eq(/(^|[^-])#0f1115/.test(html), true, '#0f1115 仍作为浅底深字的前景色保留');
+
 console.log(fails ? `\n失败 ${fails} 项` : '\n全部通过');
 process.exit(fails ? 1 : 0);
