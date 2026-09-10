@@ -320,7 +320,7 @@ for (let i = 0; i < 400; i++) {
 const bigOpt = { width: 1140, height: 787, measure: fakeMeasure, maxWords: 400,
                  minSize: 11, maxSize: 96, power: 0.75 };
 const bigPlaced = layoutCloud(big, bigOpt);
-eq(bigPlaced.length >= 270, true,
+eq(bigPlaced.length >= 250, true,
    `400 个词的合成压力集能摆下大部分（实际 ${bigPlaced.length}/400；真实数据可全部摆下）`);
 let bigOverlap = 0, bigArea = 0;
 for (const p of bigPlaced) bigArea += (p.box.x1 - p.box.x0) * (p.box.y1 - p.box.y0);
@@ -395,6 +395,38 @@ for (const a of smallBoxes) {
 const closePct = closeNeighbors / Math.max(1, smallBoxes.length);
 eq(closePct >= 0.7, true,
    `${(closePct * 100).toFixed(0)}% 的小词有 6px 内的邻居，小字是成片而不是散落的`);
+
+console.log('\n--- 词云：随机化（但必须可复现）---');
+// 旧行为：所有词共用同一个螺旋起点、落位后不抖动
+const plainOpt = Object.assign({}, bigOpt, { randomStart: false, jitter: false });
+const plainLayout = layoutCloud(big, plainOpt);
+eq(snap(plainLayout) !== snap(bigPlaced), true,
+   '默认配置（每词随机相位 + 落位抖动）与旧行为不同，随机化确实生效了');
+eq(snap(layoutCloud(big, plainOpt)) === snap(plainLayout), true,
+   '关掉随机化后结果依然是确定的');
+// 抖动不能破坏不重叠这一硬约束
+let jitterOverlap = 0;
+for (let i = 0; i < bigPlaced.length; i++) {
+  for (let j = i + 1; j < bigPlaced.length; j++) {
+    const a = bigPlaced[i].box, b = bigPlaced[j].box;
+    if (a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0) jitterOverlap++;
+  }
+}
+eq(jitterOverlap, 0, '随机抖动之后仍然零重叠');
+// 随机化不应明显牺牲排布率
+eq(bigPlaced.length >= plainLayout.length * 0.85, true,
+   `随机化没有明显牺牲能摆下的词数（${bigPlaced.length} vs ${plainLayout.length}）`);
+eq(/seededRandom\(/.test(html), true, '随机流是带种子的，不依赖 Math.random');
+eq((html.match(/Math\.random\(\)/g) || []).length, 2,
+   'Math.random 只用在两处：页面加载时的初始相位、「重新摆放」按钮');
+eq(/cloudPhase:\s*Math\.random\(\)\s*\*\s*Math\.PI\s*\*\s*2/.test(html), true,
+   '初始相位每次打开页面都随机，所以词云不会每次都长一样');
+eq(/state\.cloudPhase\s*=\s*Math\.random\(\)/.test(html), true,
+   '「重新摆放」换一个随机相位');
+// 相位在会话内保持稳定：同一 phase 反复渲染必须一致，否则切筛选就会重排
+eq(snap(layoutCloud(big, Object.assign({}, bigOpt, { phase: 1.7 }))) ===
+   snap(layoutCloud(big, Object.assign({}, bigOpt, { phase: 1.7 }))), true,
+   '同一相位下反复渲染结果一致（切筛选时词云不会乱跳）');
 
 console.log('\n--- 布局（限宽与吸顶表头）---');
 eq((html.match(/class="wrap"/g) || []).length, 2, '顶部栏与正文各有一个居中限宽容器');

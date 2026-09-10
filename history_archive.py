@@ -1593,7 +1593,9 @@ const chipsEl   = document.getElementById('chips');
 // 当前筛选条件，UI 永远从这里读、往这里写
 const state = { q:'', browser:'', time:'all', day:'', from:'', to:'', useRegex:false,
                 view:'list', cloudSource:'title', cloudTop:200,
-                cloudPhase:0 };
+                // 初始相位每次打开页面都随机：否则布局写死成同一个，看几次就腻。
+                // 同一次会话里相位不变，所以切筛选、搜关键词时词云不会重排。
+                cloudPhase: Math.random() * Math.PI * 2 };
 let filtered = DATA, shown = 0, currentMatcher = null;
 
 // ==========================================================================
@@ -1940,6 +1942,7 @@ function layoutCloud(terms, opts){
     phase: 0, cell: 36,
     spiralSteps: 2600, spiralDr: 1.5, spiralDa: 0.32,
     fallbackTries: 2000, fallback: true,
+    jitter: true, jitterRange: 8, jitterTries: 12,
   }, opts || {});
 
   const placed = [];
@@ -1967,6 +1970,14 @@ function layoutCloud(terms, opts){
     const textH = size * o.lineFactor;
     const pad = o.padding;
 
+    // 每个词一个独立的随机流（种子含 idx 和 phase）：
+    // 起点方向不同，词就不会一圈一圈地整齐排在同一半径上，
+    // 同时保证「同一个 phase 下结果可复现」。
+    const rnd = seededRandom(
+      (0x9e3779b9 ^ Math.imul(idx + 1, 2654435761) ^ Math.round(o.phase * 1e6)) >>> 0);
+    const startAngle = o.randomStart === false ? o.phase
+                                                : o.phase + rnd() * Math.PI * 2;
+
     // 所有词一律横排：竖排的字读起来费劲，这里不做
     const boxAt = (x, y) => {
       const box = { x0: x - textW / 2 - pad, y0: y - textH / 2 - pad,
@@ -1977,10 +1988,11 @@ function layoutCloud(terms, opts){
 
     let hit = null;
     for (let step = 0; step < o.spiralSteps && !hit; step++) {
-      const angle = o.phase + step * o.spiralDa;
-      const rr = o.spiralDr * angle;
-      const x = cx + rr * Math.cos(angle);
-      const y = cy + rr * Math.sin(angle) * 0.62;   // 竖向压扁，贴合宽扁的画布
+      // 半径只由步数决定，起始角只改变方向，不改变从中心出发这件事
+      const ang = startAngle + step * o.spiralDa;
+      const rr = o.spiralDr * o.spiralDa * step;
+      const x = cx + rr * Math.cos(ang);
+      const y = cy + rr * Math.sin(ang) * 0.62;     // 竖向压扁，贴合宽扁的画布
       const box = boxAt(x, y);
       if (box) hit = { text: term.text, count: term.count, size: size,
                        x: x, y: y, box: box, rank: idx };
@@ -1989,9 +2001,6 @@ function layoutCloud(terms, opts){
     // 螺线在大半径处的采样点间距会拉开到上百像素，边缘的小空隙全靠这一步填。
     // tries 调小一点，免得外围被塞得过满。
     if (!hit && o.fallback) {
-      const seed = (0x9e3779b9 ^ Math.imul(idx + 1, 2654435761)
-                    ^ Math.round(o.phase * 1e6)) >>> 0;
-      const rnd = seededRandom(seed);
       for (let k = 0; k < o.fallbackTries && !hit; k++) {
         const x = o.width * rnd();
         const y = o.height * rnd();
@@ -1999,6 +2008,32 @@ function layoutCloud(terms, opts){
         if (box) hit = { text: term.text, count: term.count, size: size,
                          x: x, y: y, box: box, rank: idx };
       }
+    }
+
+    // 落位后在附近抖一抖，并挑「四周还能再往外扩最多」的那个位置。
+    // 不加这一步的话，词会紧贴着螺旋线排，整片看起来是一圈一圈的。
+    if (hit && o.jitter !== false) {
+      const range = o.jitterRange || 8;
+      let best = hit, bestSlack = -1;
+      for (let k = 0; k < (o.jitterTries || 12); k++) {
+        const jx = hit.x + (rnd() * 2 - 1) * range;
+        const jy = hit.y + (rnd() * 2 - 1) * range;
+        const box = boxAt(jx, jy);
+        if (!box) continue;
+        let slack = 0;
+        for (let e = 1; e <= 4; e++) {
+          if (grid.hits({ x0: box.x0 - e, y0: box.y0 - e, x1: box.x1 + e, y1: box.y1 + e })) break;
+          slack = e;
+        }
+        // 用 >=：扩容量打平时取后一个候选，否则绝大多数候选都是 0，
+        // 位置永远不会动，抖动就形同虚设。
+        if (slack >= bestSlack) {
+          bestSlack = slack;
+          best = { text: term.text, count: term.count, size: size,
+                   x: jx, y: jy, box: box, rank: idx };
+        }
+      }
+      hit = best;
     }
 
     if (hit) { placed.push(hit); grid.insert(hit.box); }
