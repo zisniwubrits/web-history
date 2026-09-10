@@ -9,6 +9,18 @@
 - 不需要关闭浏览器：工具会先把被锁住的数据库整份复制出来再读
 - 全部数据留在本地，不联网、不上传
 
+## 环境要求
+
+| 项 | 要求 | 说明 |
+| --- | --- | --- |
+| 操作系统 | **仅 Windows 10 / 11** | 浏览器的用户数据目录是按 Windows 的路径规则写死的，macOS / Linux 上 `detect` 会一个历史库都找不到 |
+| Python | **3.8 或更高**，且要在 `PATH` 里 | 只用到标准库。在命令行里敲 `python --version` 能出版本号才算合格。已在 3.12 和 3.13 上实跑验证，语法层面兼容到 3.7 |
+| Node.js | 可选 | 只有跑 `test_viewer.js` 这个前端筛选逻辑的测试才需要，日常使用完全不需要 |
+
+**其它平台能不能用？** 归档核心逻辑（SQLite 读写、时间换算、导出）是与平台无关的，
+要支持 macOS / Linux 主要改两处：各浏览器用户数据目录的路径表（`CHROMIUM_ROOTS`、
+`FIREFOX_ROOTS`），以及 `install-task.ps1` 换成 cron / launchd。欢迎 PR。
+
 ---
 
 ## 快速开始
@@ -31,13 +43,16 @@ python history_archive.py view
 python history_archive.py export          # 同时生成下面三个文件
 ```
 
-`export` 会在 `archive/exports/` 下生成：
+`export` 会在 `<归档目录>/exports/` 下生成：
 
 | 文件 | 说明 |
 | --- | --- |
 | `history.html` | 网页版历史记录，`view` 命令打开的就是它 |
 | `history.csv` | 带 BOM 的 UTF-8，Excel 直接双击打开不乱码 |
 | `history.jsonl` | 每行一个 JSON 对象，方便喂给别的程序 |
+
+> 归档目录默认是**脚本所在目录**下的 `archive/`，与你的用户名、盘符都无关，
+> clone 到哪里就在哪里生成。需要换位置见下面「命令一览」里的 `--archive`。
 
 ---
 
@@ -61,7 +76,7 @@ Start-ScheduledTask -TaskName WebHistoryArchive                         # 立刻
 powershell -ExecutionPolicy Bypass -File install-task.ps1 -Uninstall   # 删除任务
 ```
 
-> **建议**：归档库放在 `E:\WorkStation\AI\web-history\archive\archive.sqlite`，
+> **建议**：归档库是**单个文件** `<脚本目录>\archive\archive.sqlite`，
 > 记得把它纳入你平时的备份（网盘 / 移动硬盘）。本工具保证不丢记录，但保证不了硬盘不坏。
 
 ---
@@ -123,11 +138,21 @@ QQ 浏览器、搜狗浏览器、CocCoc。
 python history_archive.py sync --extra-root "D:\Portable\Chrome\User Data"
 ```
 
+### 实测覆盖情况
+
+这个表是诚实的现状，不是宣传语：
+
+| 浏览器 | 验证方式 |
+| --- | --- |
+| Chrome、Edge | **在真实机器上实机验证**（含浏览器正在运行、数据库被锁的情况） |
+| Firefox | 用真实 `places.sqlite` schema 造的合成库跑通全流程（`test_firefox.py`，26 项断言）。**没有在真正装过 Firefox 的机器上实机跑过**，遇到问题欢迎提 issue |
+| 其余 Chromium 系 | 走的是与 Chrome / Edge 完全相同的代码路径，但未逐一实机验证 |
+
 ---
 
 ## 数据存在哪、长什么样
 
-所有数据都在一个文件里：`archive/archive.sqlite`。
+所有数据都在一个文件里：`<归档目录>/archive.sqlite`（默认 `archive/archive.sqlite`）。
 
 | 表 | 内容 |
 | --- | --- |
@@ -255,14 +280,46 @@ WHERE u.url LIKE '%github.com/yourname%';
 
 ---
 
+## 给开发者：怎么跑测试
+
+改动代码后跑这两个脚本，别把已经修好的坑再踩回去：
+
+```powershell
+python test_firefox.py    # Firefox 归档路径（合成 places.sqlite，26 项断言）
+python history_archive.py view --no-open
+node test_viewer.js       # 网页版筛选与正则逻辑（82 项断言，需先跑上一行）
+```
+
+`test_viewer.js` 从生成的 HTML 里抽出标记为 `__FILTER_LOGIC_START__` /
+`__FILTER_LOGIC_END__` 的纯函数区间来测，所以它验证的是**页面里真正在跑的那份代码**，
+不是副本。
+
+覆盖到的坑包括：东八区下 `toISOString()` 取 UTC 日期导致「今天」错一天、
+带 `g` 标志的正则 `test()` 状态污染、`a*` 类正则的空匹配死循环、
+普通模式下 `.` 必须当字面量、Firefox 的 1970 微秒时间基准等。
+
+---
+
 ## 文件清单
 
 | 文件 | 作用 |
 | --- | --- |
 | `history_archive.py` | 主程序，全部功能都在这里 |
 | `install-task.ps1` | 注册 / 卸载 Windows 计划任务 |
-| `test_viewer.js` | 网页版筛选逻辑的回归测试（`node test_viewer.js`，需先跑过 `view`） |
-| `archive/archive.sqlite` | **归档数据库本体，这就是你的永久历史** |
-| `archive/exports/` | 导出的 CSV / JSONL / HTML |
-| `archive/logs/` | 每次归档的日志 |
-| `archive/backups/` | `backup` 命令产生的备份 |
+| `test_firefox.py` | Firefox 归档路径的测试（`python test_firefox.py`） |
+| `test_viewer.js` | 网页版筛选与正则逻辑的测试（`node test_viewer.js`） |
+| `LICENSE` | MIT |
+| `<归档目录>/archive.sqlite` | **归档数据库本体，这就是你的永久历史** |
+| `<归档目录>/exports/` | 导出的 CSV / JSONL / HTML |
+| `<归档目录>/logs/` | 每次归档的日志 |
+| `<归档目录>/backups/` | `backup` 命令产生的备份 |
+
+> 归档目录默认是脚本同级的 `archive/`，已被 `.gitignore` 排除——
+> **你的浏览记录不会被提交进 git**，clone 和推送的永远只有源码。
+
+---
+
+## 许可证
+
+[MIT](LICENSE)。随便用、随便改、随便分发，保留版权声明即可。
+
