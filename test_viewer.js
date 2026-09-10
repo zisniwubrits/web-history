@@ -9,8 +9,12 @@ if (i < 0 || j < 0) { console.error('找不到逻辑区间标记'); process.exit
 const code = html.slice(i + START.length, j);
 
 const mod = new Function(code + '\nreturn {dayStr, shiftDay, timeWindow, rangeLabel, matchesFilters,'
-  + ' parseQuery, buildMatcher, splitMatches, escapeRegExp};')();
-const { dayStr, timeWindow, matchesFilters, parseQuery, buildMatcher, splitMatches } = mod;
+  + ' parseQuery, buildMatcher, splitMatches, escapeRegExp,'
+  + ' cleanText, latinWords, cjkRuns, hostTerm, extractTerms, topTerms,'
+  + ' layoutCloud, cloudColor, isNoiseTerm};')();
+const { dayStr, timeWindow, matchesFilters, parseQuery, buildMatcher, splitMatches,
+        cleanText, latinWords, hostTerm, extractTerms, topTerms, layoutCloud,
+        cloudColor } = mod;
 
 const TODAY = new Date(2026, 8, 10, 14, 30, 0);   // 2026-09-10 本地时间
 let fails = 0;
@@ -176,10 +180,111 @@ const ihAssigns = [...html.matchAll(/\.innerHTML\s*=\s*([^;]+);/g)].map(m => m[1
 eq(ihAssigns.length > 0 && ihAssigns.every(v => v === "''"), true,
    "innerHTML 只被赋值为空串，内容一律走 DOM 节点（" + ihAssigns.length + " 处）");
 
+console.log('\n--- 词云：文本清洗与分词 ---');
+eq(cleanText('DeepSeek 开放平台 | 官网'), 'deepseek 开放平台 官网', '分隔符与竖线变空格并转小写');
+eq(cleanText('看这个 https://a.com/x?y=1 好吗').indexOf('http'), -1, '裸链接被丢掉');
+eq(latinWords('DeepSeek API v3 好用'), ['deepseek', 'api'], '英文词过滤停用词与短词');
+eq(latinWords('the and for 123 abc'), ['abc'], '停用词和纯数字被过滤');
+eq(latinWords('C++ 与 Python3'), ['python3'], '特殊字符不会产生脏词');
+eq(mod.cjkRuns('abc 中文测试 xyz 第二段'), ['中文测试', '第二段'], '汉字串被正确切出');
+
+console.log('\n--- 词云：站点名提取 ---');
+eq(hostTerm('www.bilibili.com'), 'bilibili', 'www 前缀被去掉');
+eq(hostTerm('i.njupt.edu.cn'), 'njupt', '多级后缀 edu.cn 取到正确的一级');
+eq(hostTerm('m.bqg948.xyz'), 'bqg948', '二级域名带数字也正常');
+eq(hostTerm('space.bilibili.com'), 'bilibili', 'space 子域被去掉');
+eq(hostTerm('localhost'), 'localhost', 'localhost 保持原样');
+eq(hostTerm('127.0.0.1'), '', '纯 IP 不产出站点名');
+eq(hostTerm(''), '', '空 host 返回空串');
+
+console.log('\n--- 词云：词频统计 ---');
+const mkRow = (title, host, dup) =>
+  ['2026-09-10 12:00:00', 'x', 'Edge', 'Default', title, 'http://a', host || 'a', 'LINK', 0, 0, '2026-09-10', dup || 1];
+// 「部落冲突」在 5 条标题里出现 -> 应当被整体取成一个词
+const cloudRows = [];
+for (let i = 0; i < 5; i++) cloudRows.push(mkRow('部落冲突升级数据 ' + i, 'clashpost.com'));
+cloudRows.push(mkRow('部落冲突攻略', 'clashpost.com'));
+cloudRows.push(mkRow('只出现一次的冷门词呀', 'rare.example.com'));
+
+const titleTerms = topTerms(extractTerms(cloudRows, 'title', 3), 50);
+const titleMap = new Map(titleTerms.map(t => [t.text, t.count]));
+eq(titleMap.get('部落冲突') >= 6, true, '高频四字短语被整体取出（部落冲突）');
+eq(titleMap.has('部落'), false, '被更长词覆盖的碎片不会重复出现');
+eq(titleMap.has('冷门词'), false, '只出现一次的词低于阈值，不进入词云');
+eq(titleTerms.every(t => t.text.length >= 2), true, '结果里没有单字');
+
+const hostTerms = topTerms(extractTerms(cloudRows, 'host', 1), 50);
+eq(hostTerms[0].text, 'clashpost', '站点模式下取到域名主体');
+eq(hostTerms[0].count, 6, '站点计次与记录数一致');
+
+const bothTerms = topTerms(extractTerms(cloudRows, 'both', 3), 50);
+const bothMap = new Map(bothTerms.map(t => [t.text, t.count]));
+eq(bothMap.has('clashpost') && bothMap.has('部落冲突'), true, '两者模式同时含标题词与站点名');
+
+console.log('\n--- 词云：按访问次数加权 ---');
+const weighted = extractTerms([mkRow('哔哩哔哩视频', 'b.com', 7)], 'title', 1);
+eq(topTerms(weighted, 10).every(t => t.count === 7), true, 'dup_count > 1 时按次数加权');
+
+console.log('\n--- 词云：排布算法 ---');
+const fakeMeasure = (text, size) => text.length * size * 0.62;
+const words = [];
+for (let i = 0; i < 60; i++) {
+  words.push({ text: '词' + i + 'word', count: 100 - i });
+}
+const placed = layoutCloud(words, {
+  width: 1000, height: 520, measure: fakeMeasure, maxWords: 60,
+});
+eq(placed.length > 20, true, `能摆下相当数量的词（实际 ${placed.length} 个）`);
+eq(placed.every(p => p.box.x0 >= 0 && p.box.y0 >= 0 &&
+                     p.box.x1 <= 1000 && p.box.y1 <= 520), true, '所有词都在画布范围内');
+let overlaps = 0;
+for (let i = 0; i < placed.length; i++) {
+  for (let j = i + 1; j < placed.length; j++) {
+    const a = placed[i].box, b = placed[j].box;
+    if (a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0) overlaps++;
+  }
+}
+eq(overlaps, 0, '没有任何两个词的包围盒重叠');
+eq(placed.every((p, i) => i === 0 || placed[i - 1].size >= p.size), true, '按字号从大到小摆放');
+eq(placed[0].size >= placed[placed.length - 1].size, true, '最高频的词字号最大');
+eq(layoutCloud([], { width: 100, height: 100, measure: fakeMeasure }).length, 0, '空输入返回空');
+eq(layoutCloud(words, { width: 0, height: 100, measure: fakeMeasure }).length, 0, '画布宽为 0 时不做排布');
+const tightWords = [];
+for (let i = 0; i < 400; i++) tightWords.push({ text: 'looooongterm' + i, count: 400 - i });
+const tight = layoutCloud(tightWords, {
+  width: 400, height: 200, measure: fakeMeasure, maxWords: 400,
+});
+eq(tight.length < 400, true, '词太多时放不下的会被丢弃而不是叠在一起');
+eq(tight.length > 0, true, '即使拥挤也仍然摆下了一部分');
+
+console.log('\n--- 词云：配色 ---');
+eq(/^#[0-9a-f]{6}$/.test(cloudColor(0, 100)), true, '颜色是合法的十六进制');
+eq(cloudColor(0, 100) !== cloudColor(99, 100), true, '高频词与低频词颜色不同');
+eq(cloudColor(0, 1), '#4d93f8', '只有一个词时用强调色');
+
+console.log('\n--- 词云：虚词裁剪的边界（曾经误伤过实词）---');
+const manyRows = (title) => {
+  const rs = [];
+  for (let i = 0; i < 4; i++) rs.push(mkRow(title, 'x.com'));
+  return rs;
+};
+const termsOf = (rows) => topTerms(extractTerms(rows, 'title', 3), 60).map(t => t.text);
+eq(termsOf(manyRows('好帮手 下载游戏 中台门户')).includes('好帮手'), true,
+   '词首实词不被误削：好帮手');
+eq(termsOf(manyRows('好帮手 下载游戏 中台门户')).includes('下载游戏'), true,
+   '词首实词不被误削：下载游戏');
+eq(termsOf(manyRows('好帮手 下载游戏 中台门户')).includes('中台门户'), true,
+   '词首实词不被误削：中台门户');
+eq(termsOf(manyRows('看攻略的好地方')).includes('看攻略'), true,
+   '词尾虚词被削掉：看攻略的 -> 看攻略');
+eq(termsOf(manyRows('看攻略的好地方')).some(t => t.endsWith('的')), false,
+   '结果里没有以「的」结尾的词');
+
 console.log('\n--- 布局（限宽与吸顶表头）---');
 eq((html.match(/class="wrap"/g) || []).length, 2, '顶部栏与正文各有一个居中限宽容器');
 eq(/<header>\s*<div class="wrap">/.test(html), true, '顶部栏内容包在 .wrap 里');
-eq(/<main class="wrap">\s*<table>/.test(html), true, '表格包在 main.wrap 里');
+eq(/<main class="wrap">\s*<section id="listView">\s*<table>/.test(html), true,
+   '表格包在 main.wrap > #listView 里');
 eq(/--maxw:\s*\d+px/.test(html), true, '定义了内容最大宽度 --maxw');
 eq(/th\s*{[^}]*top:\s*var\(--headh\)/s.test(html), true, '表头 sticky 用 --headh 而不是 top:0');
 eq(html.indexOf('syncHeaderHeight()') >= 0, true, '有回填顶部栏高度的逻辑');
@@ -222,6 +327,36 @@ for (const stale of ['#161a22', '#69a7ff', '#262c38', '#1e232d', '#98a2b5',
 }
 eq(html.indexOf('color-mix('), -1, '没有用 color-mix（改用与 DSH 一致的 8 位 hex 透明度）');
 eq(/(^|[^-])#0f1115/.test(html), true, '#0f1115 仍作为浅底深字的前景色保留');
+
+console.log('\n--- 词云界面结构 ---');
+for (const need of ['id="viewToggle"', 'id="listView"', 'id="cloudView"',
+                    'id="cloudWrap"', 'id="cloud"', 'id="cloudTip"',
+                    'id="srcToggle"', 'id="cloudTop"', 'id="cloudRedraw"',
+                    'data-view="cloud"', 'data-src="host"', 'data-src="both"']) {
+  eq(html.indexOf(need) >= 0, true, `页面包含: ${need}`);
+}
+eq(/<canvas id="cloud">/.test(html), true, '词云用 canvas 绘制');
+eq(html.indexOf('__WORDCLOUD_LOGIC_START__') >= 0, true, '词云逻辑有独立标记可测');
+for (const fn of ['function setView(', 'function renderCloud(', 'function scheduleCloud(',
+                  'function measureTerm(', 'function cloudHitAt(']) {
+  eq(html.indexOf(fn) >= 0, true, `含函数: ${fn}`);
+}
+eq(html.indexOf('devicePixelRatio') >= 0, true, '处理了高分屏缩放');
+eq(/\.width\s*=\s*Math\.round\(cssW \* dpr\)/.test(html), true,
+   'canvas 位图按 DPR 放大（cssW * dpr）');
+eq(/setTransform\(dpr, 0, 0, dpr, 0, 0\)/.test(html), true,
+   '绘制坐标按 DPR 缩放，避免高分屏发虚');
+
+console.log('\n--- 整段内联脚本能否通过编译 ---');
+const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+eq(scripts.length, 1, '只有一个内联脚本块');
+let compileErr = '';
+try {
+  new Function(scripts[0]);        // 只编译不执行
+} catch (e) {
+  compileErr = e.message;
+}
+eq(compileErr, '', '整段脚本语法正确' + (compileErr ? `（${compileErr}）` : ''));
 
 console.log(fails ? `\n失败 ${fails} 项` : '\n全部通过');
 process.exit(fails ? 1 : 0);

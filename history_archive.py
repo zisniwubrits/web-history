@@ -1430,6 +1430,32 @@ HTML_TEMPLATE = r"""<!doctype html>
           border-color:transparent; font-weight:500; }
   #more:hover { background:#ebeef2; }
 
+  /* ---- 分段控件（DSH 的 ghost-active 选中态）---- */
+  .seg { display:inline-flex; gap:2px; padding:2px; background:var(--bg-layer-1);
+         border:1px solid var(--border-l1); border-radius:var(--radius-pill); }
+  .seg button { height:26px; padding:0 12px; font-size:13px;
+                color:var(--label-tertiary); background:transparent;
+                border:none; border-radius:14px; }
+  .seg button:hover { background:var(--hover); color:var(--label-primary); }
+  .seg button.on { color:var(--label-primary); background:var(--bg-layer-3);
+                   box-shadow:inset 0 0 0 1px var(--border-l3); }
+  h1 .seg { margin-left:auto; }
+
+  /* ---- 词云 ---- */
+  #cloudView { padding:20px 0 48px; }
+  .cloudBar { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+              margin-bottom:12px; }
+  .cloudBar .hint { margin-left:auto; }
+  #cloudWrap { position:relative; overflow:hidden;
+               background:var(--bg-layer-1);
+               border:1px solid var(--border-l1); border-radius:var(--radius-md); }
+  #cloud { display:block; width:100%; cursor:pointer; }
+  #cloudTip { position:absolute; left:0; top:0; opacity:0; pointer-events:none;
+              padding:4px 8px; font-size:12px; line-height:18px; white-space:nowrap;
+              color:var(--label-primary); background:#43454a;
+              border:1px solid var(--border-l2); border-radius:var(--radius-sm);
+              transition:opacity var(--dur) var(--ease); }
+
   /* 窄屏：收紧留白，并让固定列让出空间 */
   @media (max-width: 860px) {
     :root { --pad: 12px; }
@@ -1438,13 +1464,20 @@ HTML_TEMPLATE = r"""<!doctype html>
     th:nth-child(1), td:nth-child(1) { width:104px !important; }
     th:nth-child(2), td:nth-child(2) { width:84px !important; }
     th:nth-child(4), td:nth-child(4) { width:78px !important; }
+    h1 { flex-direction:column; align-items:flex-start; }
+    h1 .seg { margin-left:0; }
   }
 </style>
 </head>
 <body>
 <header>
  <div class="wrap">
-  <h1>浏览历史归档 <span class="count" id="total"></span></h1>
+  <h1>浏览历史归档 <span class="count" id="total"></span>
+    <span class="seg" id="viewToggle">
+      <button type="button" data-view="list" class="on">列表</button>
+      <button type="button" data-view="cloud">词云</button>
+    </span>
+  </h1>
 
   <div class="row">
     <input id="q" placeholder="搜索 URL 或标题…" autocomplete="off" spellcheck="false">
@@ -1489,6 +1522,7 @@ HTML_TEMPLATE = r"""<!doctype html>
  </div>
 </header>
 <main class="wrap">
+ <section id="listView">
   <table>
     <thead><tr>
       <th style="width:148px">时间</th><th style="width:116px">浏览器</th>
@@ -1497,6 +1531,28 @@ HTML_TEMPLATE = r"""<!doctype html>
     <tbody id="tbody"></tbody>
   </table>
   <button id="more" style="display:none">加载更多</button>
+ </section>
+
+ <section id="cloudView" hidden>
+  <div class="cloudBar">
+    <span class="seg" id="srcToggle">
+      <button type="button" data-src="title" class="on">标题</button>
+      <button type="button" data-src="host">站点</button>
+      <button type="button" data-src="both">两者</button>
+    </span>
+    <select id="cloudTop" title="显示多少个词">
+      <option value="50">前 50 个词</option>
+      <option value="100" selected>前 100 个词</option>
+      <option value="200">前 200 个词</option>
+    </select>
+    <button id="cloudRedraw" type="button">重新摆放</button>
+    <span class="hint" id="cloudHint"></span>
+  </div>
+  <div id="cloudWrap">
+    <canvas id="cloud"></canvas>
+    <div id="cloudTip"></div>
+  </div>
+ </section>
 </main>
 <script>
 const DATA = __DATA__;
@@ -1515,6 +1571,16 @@ const toEl    = document.getElementById('to');
 const clearEl = document.getElementById('clear');
 const reToggle = document.getElementById('reToggle');
 const errEl    = document.getElementById('err');
+const viewToggle = document.getElementById('viewToggle');
+const listView   = document.getElementById('listView');
+const cloudView  = document.getElementById('cloudView');
+const srcToggle  = document.getElementById('srcToggle');
+const cloudTop   = document.getElementById('cloudTop');
+const cloudRedraw = document.getElementById('cloudRedraw');
+const cloudHint  = document.getElementById('cloudHint');
+const cloudWrap  = document.getElementById('cloudWrap');
+const cloud      = document.getElementById('cloud');
+const cloudTip   = document.getElementById('cloudTip');
 const condRow = document.getElementById('condRow');
 const condLabel = document.getElementById('condLabel');
 const condHint  = document.getElementById('condHint');
@@ -1524,7 +1590,9 @@ const fillAll   = document.getElementById('fillAll');
 const chipsEl   = document.getElementById('chips');
 
 // 当前筛选条件，UI 永远从这里读、往这里写
-const state = { q:'', browser:'', time:'all', day:'', from:'', to:'', useRegex:false };
+const state = { q:'', browser:'', time:'all', day:'', from:'', to:'', useRegex:false,
+                view:'list', cloudSource:'title', cloudTop:100,
+                cloudPhase:0, cloudRotate:3 };
 let filtered = DATA, shown = 0, currentMatcher = null;
 
 // ==========================================================================
@@ -1654,8 +1722,230 @@ function splitMatches(text, matcher){
   if (last < text.length) out.push({ text: text.slice(last), hit: false });
   return out;
 }
-/* __FILTER_LOGIC_END__ */
+// ==========================================================================
+// 词云：分词、统计、排布（纯函数，可单独测试）
+// ==========================================================================
+/* __WORDCLOUD_LOGIC_START__ */
+// 中文没有空格，纯标准库做不到词性标注，这里用「n-gram + 频次挑选」：
+// 先统计 2/3/4 元组的出现次数，再在每个汉字串里从左往右贪心取
+// 「够高频的最长片段」。高频短语（如「部落冲突」）会被整体取出，
+// 低频的碎片则被丢弃——这正是词云想要的效果。
+const STOPWORDS = new Set([
+  // 英文
+  'the','and','for','from','with','that','this','you','your','are','was','were',
+  'have','has','had','not','but','all','can','will','would','there','their','what',
+  'when','where','which','who','how','why','his','her','its','our','out','one',
+  'two','new','get','got','use','used','using','via','com','www','http','https',
+  'html','index','page','home','login','sign','search','google','about','more',
+  'cc','tv','xyz','info','net','org','edu','gov','io','cn','app','dev','site',
+  'user','view','list','item','post','news','main','null','undefined','true','false',
+  // 中文（单字与高频虚词，出现即无信息量）
+  '的','了','和','是','在','我','有','就','不','人','都','一','上','也','很',
+  '到','说','要','去','你','会','着','没','看','好','自','己','这','那','他',
+  '她','它','们','个','之','与','及','或','而','但','被','把','让','从','对',
+  '向','于','为','以','所','能','可','该','此','其','中','等','各','又','再',
+  '才','只','更','最','呢','吗','啊','吧','呀','是','地','得','过','下','来',
+  '我们','他们','你们','这个','那个','什么','怎么','可以','一个','就是','不是',
+  '没有','自己','现在','已经','但是','因为','所以','如果','还是','这么','那么',
+  '之后','之前','时候','一些','一样','大家','需要','使用','进行','通过','关于',
+  '以及','或者','并且','而且','然后','只是','还有','全部','所有','每个','各种',
+  '一下','一直','一起','开始','结束','更多','相关','内容','页面','网站','首页',
+]);
 
+const CJK_CLASS = '[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff]';
+const CJK_RUN_RE = new RegExp(CJK_CLASS + '+', 'g');
+
+// 去掉链接、把各种分隔符与全角标点换成空格、折叠空白，再转小写
+function cleanText(s){
+  return (s || '')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/[\u2000-\u206f\u3001-\u303f\uff01-\uff5e|丨·—–_/\\>»«[\](){}<>《》，。！？、；：,.!?;:"'`~@#$%^&*+=]+/g, ' ')
+    .replace(/[\u3000\s]+/g, ' ')      // 必须在标点替换之后，否则会留下连续空格
+    .trim()
+    .toLowerCase();
+}
+
+// 英文与数字词：至少以两个字母开头（挡掉 v3、x2 这类碎片），纯数字和停用词丢掉
+function latinWords(text){
+  const out = [];
+  const re = /[a-z]{2}[a-z0-9]*/g;
+  const lower = String(text || '').toLowerCase();
+  let m;
+  while ((m = re.exec(lower)) !== null) {
+    if (!STOPWORDS.has(m[0])) out.push(m[0]);
+  }
+  return out;
+}
+
+function cjkRuns(text){
+  return text.match(CJK_RUN_RE) || [];
+}
+
+// 只去掉词尾的真虚词字：「看攻略的」->「看攻略」。
+// 注意别拿整张停用词表来削——「好帮手」的「好」、「下载游戏」的「下」都是实词的一部分。
+const CJK_PARTICLES = new Set(['的','了','着','呢','吗','吧','啊','呀','哦','嗯',
+                               '嘛','啦','咯','哇','喔','噢']);
+function trimParticles(term){
+  let s = term;
+  while (s.length > 2 && CJK_PARTICLES.has(s[s.length - 1])) s = s.slice(0, -1);
+  return s;
+}
+
+// 整个词都是停用字（例如「的我」「了他」）就丢掉
+function isNoiseTerm(term){
+  if (STOPWORDS.has(term)) return true;
+  if (term.length < 2) return true;
+  let stop = 0;
+  for (const ch of term) if (STOPWORDS.has(ch)) stop++;
+  return stop === term.length;
+}
+
+// 站点名：www.bilibili.com -> bilibili，i.njupt.edu.cn -> njupt
+const HOST_PREFIX = new Set(['www','m','i','space','search','api','static','cdn',
+  'img','v','t','bbs','blog','new','beta','docs','wiki','en','cn','mail','web',
+  'passport','account','login','shop','pan','live','www2']);
+const SECOND_LEVEL = new Set(['com','net','org','edu','gov','co','ac','gob','mil',
+  'or','ne','go','info','biz','tv','cc']);
+
+function hostTerm(host){
+  if (!host) return '';
+  const h = String(host).toLowerCase();
+  if (/^[\d.]+$/.test(h)) return '';          // 纯 IP 没有站点名可言
+  const parts = h.split('.').filter(Boolean);
+  if (parts.length < 2) return parts[0] || '';
+  let mid = parts.slice(0, -1);
+  while (mid.length > 1 && HOST_PREFIX.has(mid[0])) mid = mid.slice(1);
+  let name = mid[mid.length - 1] || '';
+  if (SECOND_LEVEL.has(name) && mid.length > 1) name = mid[mid.length - 2];
+  return name.replace(/[^a-z0-9-]/g, '');
+}
+
+// 主入口：把若干行记录聚合成 {词 -> 次数}
+// source: 'title' | 'host' | 'both'
+function extractTerms(rows, source, minCount){
+  const count = new Map();
+  const bump = (k, w) => { if (k) count.set(k, (count.get(k) || 0) + w); };
+  const runs = [];            // 汉字串，稍后统一做 n-gram 挑选
+
+  for (const r of rows) {
+    const w = Math.max(1, r[11] || 1);      // 按实际访问次数加权
+    if (source === 'host' || source === 'both') bump(hostTerm(r[6]), w);
+    if (source === 'host') continue;
+
+    const text = cleanText(r[4] || '');
+    for (const word of latinWords(text)) bump(word, w);
+    for (const run of cjkRuns(text)) runs.push([run, w]);
+  }
+
+  if (source !== 'host') {
+    const need = minCount === undefined ? 3 : minCount;
+    const grams = [new Map(), new Map(), new Map()];   // 2 / 3 / 4 元组
+    for (const [run, w] of runs) {
+      for (let n = 2; n <= 4; n++) {
+        for (let i = 0; i + n <= run.length; i++) {
+          const g = run.substr(i, n);
+          grams[n - 2].set(g, (grams[n - 2].get(g) || 0) + w);
+        }
+      }
+    }
+    for (const [run, w] of runs) {
+      let i = 0;
+      while (i < run.length) {
+        let taken = 0;
+        for (let n = 4; n >= 2; n--) {                 // 优先取最长的
+          if (i + n > run.length) continue;
+          const g = run.substr(i, n);
+          if ((grams[n - 2].get(g) || 0) >= need) { bump(trimParticles(g), w); taken = n; break; }
+        }
+        i += taken || 1;                                // 都不够高频就跳过这个字
+      }
+    }
+  }
+
+  for (const k of [...count.keys()]) if (isNoiseTerm(k)) count.delete(k);
+  return count;
+}
+
+// 把 {词:次数} 排序并截断
+function topTerms(counts, limit){
+  const arr = [];
+  for (const [text, n] of counts) arr.push({ text: text, count: n });
+  arr.sort((a, b) => b.count - a.count || (a.text < b.text ? -1 : 1));
+  return limit ? arr.slice(0, limit) : arr;
+}
+
+// 词云排布：从中心向外沿螺线找空位，放不下就跳过。
+// measure(text, size) 由调用方注入，这样这个函数不依赖 canvas，可以单独测。
+function layoutCloud(terms, opts){
+  const o = Object.assign({
+    width: 1000, height: 520, minSize: 13, maxSize: 56,
+    padding: 3, maxWords: 100, measure: (t, s) => t.length * s * 0.62,
+    rotateEvery: 3, phase: 0,
+  }, opts || {});
+
+  const placed = [];
+  if (!terms.length || o.width <= 0 || o.height <= 0) return placed;
+
+  const list = terms.slice(0, o.maxWords);
+  const maxC = list[0].count;
+  const minC = list[list.length - 1].count;
+  const sMax = Math.sqrt(maxC), sMin = Math.sqrt(minC);
+  const span = sMax - sMin;
+
+  const boxes = [];
+  const cx = o.width / 2, cy = o.height / 2;
+  const pad = o.padding;
+
+  for (let idx = 0; idx < list.length; idx++) {
+    const term = list[idx];
+    const t = span > 0 ? (Math.sqrt(term.count) - sMin) / span : 1;
+    const size = Math.round(o.minSize + t * (o.maxSize - o.minSize));
+    const textW = Math.max(1, o.measure(term.text, size));
+    const textH = size * 1.2;
+    // 每 rotateEvery 个词允许竖排一个，让画面不至于全是横条
+    const rotations = (o.rotateEvery > 0 && idx % o.rotateEvery === o.rotateEvery - 1)
+      ? [0, 90] : [0];
+
+    let hit = null;
+    for (let step = 0; step < 2600 && !hit; step++) {
+      const angle = o.phase + step * 0.32;
+      const r = 1.5 * angle;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle) * 0.62;   // 竖向压扁，贴合宽扁的画布
+      for (const rot of rotations) {
+        const halfW = (rot ? textH : textW) / 2 + pad;
+        const halfH = (rot ? textW : textH) / 2 + pad;
+        const box = { x0: x - halfW, y0: y - halfH, x1: x + halfW, y1: y + halfH };
+        if (box.x0 < 0 || box.y0 < 0 || box.x1 > o.width || box.y1 > o.height) continue;
+        let clash = false;
+        for (const b of boxes) {
+          if (box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0) {
+            clash = true; break;
+          }
+        }
+        if (clash) continue;
+        hit = { text: term.text, count: term.count, size: size,
+                x: x, y: y, rot: rot, box: box, rank: idx };
+        break;
+      }
+    }
+    if (hit) { placed.push(hit); boxes.push(hit.box); }
+  }
+  return placed;
+}
+
+// 按排名给颜色，从强调蓝过渡到次级灰（都取自 DSH 令牌）
+function cloudColor(rank, total){
+  const p = total > 1 ? rank / (total - 1) : 0;
+  if (p < 0.06) return '#4d93f8';
+  if (p < 0.18) return '#679efe';
+  if (p < 0.42) return '#cfd3d6';
+  if (p < 0.70) return '#adb2b8';
+  return '#81858c';
+}
+/* __WORDCLOUD_LOGIC_END__ */
+
+/* __FILTER_LOGIC_END__ */
 // ==========================================================================
 // 界面
 // ==========================================================================
@@ -1842,6 +2132,7 @@ function update(){
   }
   renderChips();
   syncHeaderHeight();   // 条件行/标签行会改变顶部栏高度，表头偏移要跟着更新
+  scheduleCloud();      // 词云视图下才会真正重算
 }
 
 function clearAll(){
@@ -1855,7 +2146,7 @@ function clearAll(){
   qEl.focus();
 }
 
-function setRegexMode(on){
+function setRegexMode(on, refresh){
   state.useRegex = on;
   reToggle.classList.toggle('on', on);
   reToggle.title = on ? '正在用正则表达式搜索（点一下切回普通搜索）'
@@ -1863,7 +2154,7 @@ function setRegexMode(on){
   qEl.placeholder = on
     ? '正则搜索，例如 deepseek|openai\\.com ，或 /^https:\\/\\/github/i'
     : '搜索 URL 或标题…';
-  update();
+  if (refresh !== false) update();
 }
 
 function readStateFromUI(){
@@ -1887,6 +2178,140 @@ fillAll.addEventListener('click', () => {
   fromEl.value = DAY_MIN; toEl.value = DAY_MAX;
   readStateFromUI(); update();
 });
+// ==========================================================================
+// 词云：渲染层（依赖 canvas / DOM）
+// ==========================================================================
+const CLOUD_FONT = (getComputedStyle(document.documentElement)
+  .getPropertyValue('--font-sans') || 'sans-serif').trim() || 'sans-serif';
+const measureCtx = document.createElement('canvas').getContext('2d');
+let cloudItems = [];
+let cloudTimer = 0;
+
+function measureTerm(text, size){
+  measureCtx.font = '600 ' + size + 'px ' + CLOUD_FONT;
+  return measureCtx.measureText(text).width;
+}
+
+function renderCloud(){
+  cloudTimer = 0;
+  if (state.view !== 'cloud') return;
+
+  const cssW = Math.max(320, cloudWrap.clientWidth || 1000);
+  const cssH = Math.max(300, Math.min(620, Math.round(cssW * 0.46)));
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cloud.width = Math.round(cssW * dpr);
+  cloud.height = Math.round(cssH * dpr);
+  cloud.style.height = cssH + 'px';
+  const ctx = cloud.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const counts = extractTerms(filtered, state.cloudSource,
+                              state.cloudTop >= 200 ? 4 : 3);
+  const terms = topTerms(counts, state.cloudTop);
+  cloudItems = layoutCloud(terms, {
+    width: cssW, height: cssH, measure: measureTerm, padding: 3,
+    minSize: 13, maxSize: Math.max(26, Math.min(54, Math.round(cssH / 9))),
+    maxWords: state.cloudTop,
+    phase: state.cloudPhase, rotateEvery: state.cloudRotate,
+  });
+
+  const total = cloudItems.length;
+  for (const it of cloudItems) {
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    if (it.rot) ctx.rotate(-Math.PI / 2);
+    ctx.font = '600 ' + it.size + 'px ' + CLOUD_FONT;
+    ctx.fillStyle = cloudColor(it.rank, total);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(it.text, 0, 0);
+    ctx.restore();
+  }
+
+  const dropped = terms.length - total;
+  cloudHint.textContent = '基于当前筛选的 ' + filtered.length.toLocaleString() +
+    ' 条记录，取出 ' + terms.length + ' 个词，放得下 ' + total + ' 个' +
+    (dropped > 0 ? '（' + dropped + ' 个太挤没排进去）' : '') +
+    '　·　点词语可回到列表并搜索它';
+}
+
+// 输入时防抖，避免每敲一个字就重算一遍分词
+function scheduleCloud(){
+  if (state.view !== 'cloud') return;
+  clearTimeout(cloudTimer);
+  cloudTimer = setTimeout(renderCloud, 90);
+}
+
+function cloudHitAt(clientX, clientY){
+  const rect = cloud.getBoundingClientRect();
+  const x = clientX - rect.left, y = clientY - rect.top;
+  for (const it of cloudItems) {
+    if (x >= it.box.x0 && x <= it.box.x1 && y >= it.box.y0 && y <= it.box.y1) {
+      return { item: it, x: x, y: y, rect: rect };
+    }
+  }
+  return null;
+}
+
+cloud.addEventListener('mousemove', (e) => {
+  const hit = cloudHitAt(e.clientX, e.clientY);
+  if (!hit) {
+    cloudTip.style.opacity = '0';
+    cloud.style.cursor = 'default';
+    return;
+  }
+  cloudTip.textContent = hit.item.text + ' · ' + hit.item.count + ' 次';
+  cloudTip.style.opacity = '1';
+  const tw = cloudTip.offsetWidth, th = cloudTip.offsetHeight;
+  cloudTip.style.left = Math.max(4, Math.min(hit.x + 12, hit.rect.width - tw - 4)) + 'px';
+  cloudTip.style.top = Math.max(4, hit.y - th - 8) + 'px';
+  cloud.style.cursor = 'pointer';
+});
+cloud.addEventListener('mouseleave', () => { cloudTip.style.opacity = '0'; });
+
+// 点词 -> 切回列表并按这个词搜索（顺手关掉正则，免得词里有特殊字符）
+cloud.addEventListener('click', (e) => {
+  const hit = cloudHitAt(e.clientX, e.clientY);
+  if (!hit) return;
+  setRegexMode(false, false);
+  qEl.value = hit.item.text;
+  state.q = hit.item.text;
+  setView('list');
+});
+
+function setView(view){
+  state.view = view;
+  for (const b of viewToggle.querySelectorAll('button')) {
+    b.classList.toggle('on', b.dataset.view === view);
+  }
+  listView.hidden = view !== 'list';
+  cloudView.hidden = view !== 'cloud';
+  cloudTip.style.opacity = '0';
+  update();
+}
+
+viewToggle.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b) setView(b.dataset.view);
+});
+srcToggle.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  state.cloudSource = b.dataset.src;
+  for (const x of srcToggle.querySelectorAll('button')) x.classList.toggle('on', x === b);
+  renderCloud();
+});
+cloudTop.addEventListener('change', () => {
+  state.cloudTop = parseInt(cloudTop.value, 10) || 100;
+  renderCloud();
+});
+cloudRedraw.addEventListener('click', () => {
+  state.cloudPhase = Math.random() * Math.PI * 2;
+  state.cloudRotate = 2 + Math.floor(Math.random() * 3);
+  renderCloud();
+});
+
 moreBtn.addEventListener('click', renderMore);
 
 // 顶部筛选栏的高度会随条件行、标签行出现而变化，表头 sticky 的偏移量得跟着更新，
@@ -1898,7 +2323,10 @@ function syncHeaderHeight(){
   const px = Math.max(0, h.getBoundingClientRect().height - 1);
   document.documentElement.style.setProperty('--headh', px + 'px');
 }
-window.addEventListener('resize', syncHeaderHeight);
+window.addEventListener('resize', () => {
+  syncHeaderHeight();
+  if (state.view === 'cloud') scheduleCloud();
+});
 
 readStateFromUI();
 update();
