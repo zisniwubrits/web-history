@@ -176,5 +176,17 @@ const ihAssigns = [...html.matchAll(/\.innerHTML\s*=\s*([^;]+);/g)].map(m => m[1
 eq(ihAssigns.length > 0 && ihAssigns.every(v => v === "''"), true,
    "innerHTML 只被赋值为空串，内容一律走 DOM 节点（" + ihAssigns.length + " 处）");
 
+console.log('\n--- 布局（限宽与吸顶表头）---');
+eq((html.match(/class="wrap"/g) || []).length, 2, '顶部栏与正文各有一个居中限宽容器');
+eq(/<header>\s*<div class="wrap">/.test(html), true, '顶部栏内容包在 .wrap 里');
+eq(/<main class="wrap">\s*<table>/.test(html), true, '表格包在 main.wrap 里');
+eq(/--maxw:\s*\d+px/.test(html), true, '定义了内容最大宽度 --maxw');
+eq(/th\s*{[^}]*top:\s*var\(--headh\)/s.test(html), true, '表头 sticky 用 --headh 而不是 top:0');
+eq(html.indexOf('syncHeaderHeight()') >= 0, true, '有回填顶部栏高度的逻辑');
+eq(/table-layout:\s*fixed/.test(html), true, '表格用固定布局，列宽可控');
+eq(html.indexOf('@media') >= 0, true, '有窄屏适配');
+eq(/td\.br\s*{[^}]*word-break/.test(html), true, '浏览器列允许换行，不会撑宽表格');
+eq(/td\.br\s*{[^}]*white-space:\s*nowrap/.test(html), false, '浏览器列不再强制不换行');
+
 console.log(fails ? `\n失败 ${fails} 项` : '\n全部通过');
 process.exit(fails ? 1 : 0);

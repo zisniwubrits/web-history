@@ -1272,13 +1272,19 @@ HTML_TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>浏览历史归档</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light dark;
+          --maxw: 1180px;        /* 内容最大宽度，宽屏下不再拉满 */
+          --pad: 20px;           /* 左右留白 */
+          --headh: 0px;          /* 顶部筛选栏实测高度，由 JS 回填 */ }
   * { box-sizing: border-box; }
   [hidden] { display:none !important; }
   body { margin:0; font: 14px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
          background:#0f1115; color:#e6e8ee; }
+  /* 居中限宽容器：背景仍然通栏，内容收在中间 */
+  .wrap { max-width:var(--maxw); margin:0 auto; padding:0 var(--pad); }
   header { position:sticky; top:0; z-index:5; background:#161a22;
-           border-bottom:1px solid #262c38; padding:12px 18px; }
+           border-bottom:1px solid #262c38; padding:12px 0; }
+  header .wrap { display:flex; flex-direction:column; gap:0; }
   h1 { margin:0 0 10px; font-size:16px; font-weight:600; letter-spacing:.3px;
        display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
   h1 .count { font-size:12px; font-weight:400; color:#7c869a; }
@@ -1286,7 +1292,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   input, select { background:#0f1115; color:#e6e8ee; border:1px solid #2c3342;
                   border-radius:8px; padding:7px 10px; font-size:13px; }
   input:focus, select:focus { outline:none; border-color:#3d6fd0; }
-  input#q { flex:1; min-width:220px; }
+  input#q { flex:1 1 240px; min-width:180px; }
   input#q.invalid { border-color:#c2453f; }
   button { background:#0f1115; color:#e6e8ee; border:1px solid #2c3342;
            border-radius:8px; padding:7px 12px; font-size:13px; cursor:pointer; }
@@ -1317,14 +1323,16 @@ HTML_TEMPLATE = r"""<!doctype html>
   .chip button:hover { background:#2c3342; color:#e6e8ee; }
   .stat { color:#8b95a7; font-size:12px; margin-top:8px; }
 
-  table { width:100%; border-collapse:collapse; }
-  th, td { text-align:left; padding:7px 10px; border-bottom:1px solid #1e232d;
+  table { width:100%; border-collapse:collapse; table-layout:fixed; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #1e232d;
            vertical-align:top; }
-  th { position:sticky; top:0; background:#12161d; color:#98a2b5; font-weight:600;
-       font-size:12px; z-index:4; }
+  /* top 用实测的筛选栏高度，否则表头会被顶部栏挡住 */
+  th { position:sticky; top:var(--headh); background:#12161d; color:#98a2b5;
+       font-weight:600; font-size:12px; z-index:4;
+       border-bottom:1px solid #262c38; }
   tr:hover td { background:#151a23; }
   td.time { white-space:nowrap; color:#8b95a7; font-variant-numeric:tabular-nums; }
-  td.br { white-space:nowrap; color:#7c869a; font-size:12px; }
+  td.br { color:#7c869a; font-size:12px; word-break:break-word; }
   td.empty { padding:38px 10px; text-align:center; color:#7c869a; }
   td.empty button { margin-left:8px; }
   a { color:#69a7ff; text-decoration:none; word-break:break-all; }
@@ -1334,10 +1342,21 @@ HTML_TEMPLATE = r"""<!doctype html>
   #more { margin:18px auto 40px; display:block; padding:9px 20px; border-radius:8px;
           border:1px solid #2c3342; background:#1a1f2a; color:#cfd6e4; cursor:pointer; }
   #more:hover { background:#222836; }
+
+  /* 窄屏：收紧留白，并让固定列让出空间 */
+  @media (max-width: 860px) {
+    :root { --pad: 12px; }
+    th, td { padding:7px 8px; }
+    th:nth-child(1), td:nth-child(1) { width:104px !important; }
+    th:nth-child(2), td:nth-child(2) { width:84px !important; }
+    th:nth-child(4), td:nth-child(4) { width:78px !important; }
+    h1 { font-size:15px; }
+  }
 </style>
 </head>
 <body>
 <header>
+ <div class="wrap">
   <h1>浏览历史归档 <span class="count" id="total"></span></h1>
 
   <div class="row">
@@ -1380,15 +1399,18 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   <div class="chips" id="chips"></div>
   <div class="stat" id="stat"></div>
+ </div>
 </header>
-<table>
-  <thead><tr>
-    <th style="width:150px">时间</th><th style="width:120px">浏览器</th>
-    <th>标题 / 链接</th><th style="width:110px">类型</th>
-  </tr></thead>
-  <tbody id="tbody"></tbody>
-</table>
-<button id="more" style="display:none">加载更多</button>
+<main class="wrap">
+  <table>
+    <thead><tr>
+      <th style="width:148px">时间</th><th style="width:116px">浏览器</th>
+      <th>标题 / 链接</th><th style="width:104px">类型</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <button id="more" style="display:none">加载更多</button>
+</main>
 <script>
 const DATA = __DATA__;
 const PAGE = 400;
@@ -1732,6 +1754,7 @@ function update(){
     renderMore();
   }
   renderChips();
+  syncHeaderHeight();   // 条件行/标签行会改变顶部栏高度，表头偏移要跟着更新
 }
 
 function clearAll(){
@@ -1778,6 +1801,17 @@ fillAll.addEventListener('click', () => {
   readStateFromUI(); update();
 });
 moreBtn.addEventListener('click', renderMore);
+
+// 顶部筛选栏的高度会随条件行、标签行出现而变化，表头 sticky 的偏移量得跟着更新，
+// 否则滚动时列标题会被顶部栏盖住。
+function syncHeaderHeight(){
+  const h = document.querySelector('header');
+  if (!h) return;
+  // 减去边框，让表头严丝合缝贴在筛选栏下沿
+  const px = Math.max(0, h.getBoundingClientRect().height - 1);
+  document.documentElement.style.setProperty('--headh', px + 'px');
+}
+window.addEventListener('resize', syncHeaderHeight);
 
 readStateFromUI();
 update();
