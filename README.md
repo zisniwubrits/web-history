@@ -32,24 +32,38 @@ python history_archive.py detect
 # 2) 归档一次（第一次会导入全部现有历史）
 python history_archive.py sync
 
-# 3) 查看历史 —— 生成网页版并用浏览器打开
+# 3) 查看历史 —— 起一个本地服务并打开
 python history_archive.py view
 ```
 
-`view` 打开的页面自带搜索框、浏览器筛选、日期筛选，双击任何一条就能跳回原网页。
-想导出成别的格式：
+`view` 会在 `127.0.0.1` 上起一个本地服务，用浏览器打开。按 `Ctrl+C` 停止。
 
-```powershell
-python history_archive.py export          # 同时生成下面三个文件
-```
+**为什么用服务而不是静态文件**：页面要能写东西（TODO），静态 HTML 做不到。
+存到浏览器 localStorage 又会跟浏览器绑定、清了缓存就没，也不在备份范围内。
 
-`export` 会在 `<归档目录>/exports/` 下生成：
+### 两种模式
 
-| 文件 | 说明 |
-| --- | --- |
-| `history.html` | 网页版历史记录，`view` 命令打开的就是它 |
-| `history.csv` | 带 BOM 的 UTF-8，Excel 直接双击打开不乱码 |
-| `history.jsonl` | 每行一个 JSON 对象，方便喂给别的程序 |
+| | `serve` / `view`（默认） | `view --static` / `export` |
+| --- | --- | --- |
+| 数据 | 页面启动时从 `/api/rows` 拉 | 生成时内嵌进 HTML |
+| 页面体积 | **67 KB** | 约 3 MB（内嵌 13,000 条） |
+| 刷新 | 有「刷新」按钮，可顺带先同步一次 | 无，要重新生成 |
+| TODO | 可读写，存进 `archive.sqlite` | 只读（页面会明确说明） |
+| 依赖 | 要跑着服务 | 双击就能看，能发给别人 |
+
+静态快照适合归档留档和分享；日常看用服务模式。
+
+### 服务的安全边界
+
+它只监听 `127.0.0.1`，局域网和外网都到不了。但同机的其它程序能连，
+所以还有两道：
+
+1. **每次启动生成一次性令牌**，写在打开的 URL 里。没有令牌一律 403
+2. **校验 `Origin` + 强制 `Content-Type: application/json`**——
+   别的网页即使猜到端口也发不出写请求（浏览器跨站只能发简单请求）
+
+另外返回头里带了 `X-Frame-Options: DENY` 和 `nosniff`，令牌用 `hmac.compare_digest`
+比对，避免时序侧信道。
 
 > 归档目录默认是**脚本所在目录**下的 `archive/`，与你的用户名、盘符都无关，
 > clone 到哪里就在哪里生成。需要换位置见下面「命令一览」里的 `--archive`。
@@ -80,6 +94,25 @@ python history_archive.py export          # 同时生成下面三个文件
 高频短语会被整体取出（`部落冲突`、`艾宾浩斯`、`星穹铁道`），低频碎片直接丢弃。
 实测 13,000 条记录分词约 40ms，所以切换筛选条件时是实时的。
 
+### TODO
+
+页面右上角第三个标签页。两种加法：
+
+- **从历史里加**：在「列表」里点某一行的 `＋`，这条链接就进了 TODO（标题一起带过去）
+- **直接写**：在 TODO 页的输入框里敲，回车即可；以 `http` 开头的会被当成链接，其余当纯文字
+
+其它：
+
+- **标签**：输入框旁边可以填标签，之后点 `＋` 加进来的记录都会带上这个标签。
+  已有标签会出现在下拉提示里，方便复用
+- **未完成 / 全部 / 已完成** 三个视图切换，标签页上有个数字角标显示未完成数
+- 每条可以勾选完成、就地编辑文字和标签、删除；「清空已完成」批量删除
+- **导出 / 导入 JSON**：导出的 `todos.json` 可以再导回来，不会产生重复
+  （按 id 去重，冲突时保留本地版本）
+
+**数据存在哪**：`archive.sqlite` 里的 `todos` 表。所以它跟着 `backup` 一起被备份，
+换浏览器、清缓存都不影响。静态快照里 TODO 是只读的（页面会明确说明）。
+
 ---
 
 ## 让「永久」真的成立
@@ -107,20 +140,40 @@ powershell -ExecutionPolicy Bypass -File install-task.ps1 -Uninstall   # 删除�
 
 ### 自我引用会被自动排除
 
-用 `view` 打开那张 `history.html` 时，**浏览器也会把这次打开记进历史**。
-下次 `sync` 就又把它归档回来——一条没有任何信息量的记录，还会越滚越多。
+工具自己的页面被打开时，**浏览器也会把这次打开记进历史**，下次 `sync` 又把它归档回来——
+一条没有任何信息量的记录，还会越滚越多。两种模式都要管：
 
-所以默认会排除 `file:` 协议且路径落在归档目录下的链接。sync 结束时会告诉你了排除几条：
+| 模式 | 页面地址 | 怎么认出来 |
+| --- | --- | --- |
+| 静态快照 | `file:///…/archive/exports/history.html` | `file:` 协议 + 路径在归档目录下 |
+| 服务模式 | `http://127.0.0.1:<端口>/history/?t=<令牌>` | 回环地址 + 固定路径 `/history/` |
+
+服务模式这条是踩过坑才补上的：**端口和令牌每次启动都不一样**，光靠它们认不出来。
+所以页面被固定在 `/history/` 路径下；访问根路径会 302 跳过去。
+
+sync 结束时会告诉你排除了几条：
 
 ```
-已排除 49 条自身产生的记录（归档页面被自己打开产生的访问）
+已排除 77 条自身产生的记录（归档页面被自己打开产生的访问）
 ```
 
-如果归档目录之外还有同类页面（比如别的工具生成的导出页），用 `--exclude` 追加关键字：
+**别人的本地服务不会被误伤**：`localhost:3000`、`localhost:5173`、`127.0.0.1:3080`
+这些都不带 `/history/`，照常归档。`test_filters.py` 里有 13 条专门盯着这件事的断言，
+包括 `https://127.0.0.1.evil.com/history/` 这种域名伪装。
+
+如果归档目录之外还有同类页面（比如别的工具生成的导出页），**加一条持久排除关键字**：
 
 ```powershell
-python history_archive.py sync --exclude bili-history.html
+python history_archive.py exclude                              # 看当前有哪些
+python history_archive.py exclude bili-history.html            # 加一条
+python history_archive.py exclude --remove bili-history.html   # 删一条
+python history_archive.py exclude --clear                      # 清空
 ```
+
+配置写在 `<归档目录>/exclude.txt`（一行一个关键字，包含即排除，不区分大小写）。
+
+> **这一点很关键**：计划任务跑的是不带参数的 `sync`，命令行上的 `--exclude` 根本传不进去，
+> 只有这份文件会被自动读取。`--exclude` 参数仍然可用，它和文件里的关键字**叠加**，不互相覆盖。
 
 已经归档进去的存量记录，用 `purge` 清掉——**默认只预演**，确认后才加 `--yes`，
 而且删除前会自动备份一份：
@@ -136,18 +189,26 @@ python history_archive.py purge --yes    # 真正执行（先自动备份）
 
 ```
 python history_archive.py [sync]            归档一次（不带参数时的默认命令）
-python history_archive.py view              生成网页版历史记录并用浏览器打开
+python history_archive.py serve             启动本地服务（不自动开浏览器）
+python history_archive.py view              启动本地服务并打开浏览器（默认）
 python history_archive.py detect            列出探测到的浏览器历史库
 python history_archive.py stats             归档统计（按浏览器/年份/站点/页面）
 python history_archive.py verify            校验归档库完整性
 python history_archive.py export [选项]     导出 CSV / JSONL / HTML
 python history_archive.py backup            一致性备份（可滚动保留 N 份）
 python history_archive.py purge             清除归档里工具自身产生的记录（默认只预演）
+python history_archive.py exclude [关键字]   管理额外排除的关键字（持久生效，计划任务会用）
 
 全局选项:
   --archive DIR        归档目录，默认 <脚本目录>/archive
                        也可用环境变量 WEB_HISTORY_ARCHIVE 指定
                        （写在子命令前面或后面都可以）
+
+serve / view 选项:
+  --port N             服务端口，默认自动挑一个空闲的
+  -v, --verbose        打印每个请求
+  --no-open            只启动服务，不打开浏览器
+  --static             （仅 view）不起服务，生成自包含的只读快照
 
 sync 选项:
   -v, --verbose        打印详细日志
@@ -160,6 +221,11 @@ purge 选项:
   --yes                真正执行删除（默认只预演，什么都不删）
   --no-backup          删除前不备份（不建议）
   --exclude / --no-self-exclude   含义同 sync
+
+exclude 选项:
+  关键字…              要添加的关键字（一行一个，包含即排除，不区分大小写）
+  --remove             删除这些关键字而不是添加
+  --clear              清空全部关键字
 
 view 选项:
   --since / --until YYYY-MM-DD   只放进这个时间范围的记录
@@ -265,9 +331,9 @@ WHERE u.url LIKE '%github.com/yourname%';
 **Q: 我要怎么查看自己的浏览记录？**
 三种方式，按推荐顺序：
 
-1. **网页版（推荐）**：`python history_archive.py view`
-   会生成 `archive/exports/history.html` 并用默认浏览器打开。这个文件是自包含的，
-   双击 `archive\exports\history.html` 也能直接打开，不依赖这个脚本。
+1. **服务模式（推荐）**：`python history_archive.py view`
+   起本地服务并用浏览器打开，按 `Ctrl+C` 停止。数据实时从归档库读，
+   有「刷新」按钮（勾上「先同步」可以顺带跑一次 sync 再刷新）。
 
    页面上的筛选：
    - **搜索框**：URL 和标题一起搜，大小写不敏感
@@ -346,9 +412,13 @@ WHERE u.url LIKE '%github.com/yourname%';
 ```powershell
 python test_filters.py    # 链接过滤（自我引用判定、路径归一化，26 项断言）
 python test_firefox.py    # Firefox 归档路径（合成 places.sqlite，26 项断言）
-python history_archive.py view --no-open
-node test_viewer.js       # 网页版筛选与正则逻辑（221 项断言，需先跑上一行）
+python test_server.py     # 本地服务（起真服务打接口：鉴权、跨站、落库，44 项断言）
+python history_archive.py view --static --no-open
+node test_viewer.js       # 页面纯逻辑（筛选/正则/词云/TODO 展示，253 项断言）
 ```
+
+`test_server.py` 会真的把服务起在随机端口上，用 `urllib` 打进去验——
+包括"不带令牌必须 403""跨站 Origin 必须被拒""TODO 必须真的落到 archive.sqlite 而不是只在内存里"。它已经抓到过一个真 bug：`ThreadingHTTPServer` 每个请求一个线程，而 SQLite 连接默认不允许跨线程使用。
 
 `test_viewer.js` 从生成的 HTML 里抽出标记为 `__FILTER_LOGIC_START__` /
 `__FILTER_LOGIC_END__` 的纯函数区间来测，所以它验证的是**页面里真正在跑的那份代码**，
@@ -368,7 +438,8 @@ node test_viewer.js       # 网页版筛选与正则逻辑（221 项断言，需
 | `install-task.ps1` | 注册 / 卸载 Windows 计划任务 |
 | `test_filters.py` | 链接过滤测试（`python test_filters.py`） |
 | `test_firefox.py` | Firefox 归档路径的测试（`python test_firefox.py`） |
-| `test_viewer.js` | 网页版筛选与正则逻辑的测试（`node test_viewer.js`） |
+| `test_server.py` | 本地服务的测试（`python test_server.py`） |
+| `test_viewer.js` | 页面纯逻辑的测试（`node test_viewer.js`） |
 | `LICENSE` | MIT |
 | `<归档目录>/archive.sqlite` | **归档数据库本体，这就是你的永久历史** |
 | `<归档目录>/exports/` | 导出的 CSV / JSONL / HTML |

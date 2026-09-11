@@ -11,7 +11,8 @@ const code = html.slice(i + START.length, j);
 const mod = new Function(code + '\nreturn {dayStr, shiftDay, timeWindow, rangeLabel, matchesFilters,'
   + ' parseQuery, buildMatcher, splitMatches, escapeRegExp,'
   + ' cleanText, latinWords, cjkRuns, hostTerm, extractTerms, topTerms,'
-  + ' layoutCloud, cloudColor, isNoiseTerm};')();
+  + ' layoutCloud, cloudColor, isNoiseTerm,'
+  + ' todoCounts, todoSort, todoFilter, todoTags, todoToJSON, todoFromJSON};')();
 const { dayStr, timeWindow, matchesFilters, parseQuery, buildMatcher, splitMatches,
         cleanText, latinWords, hostTerm, extractTerms, topTerms, layoutCloud,
         cloudColor } = mod;
@@ -169,7 +170,7 @@ const haveOptions = [...html.matchAll(/<option value="([^"]*)"/g)].map(m => m[1]
 eq(wantOptions.every(v => haveOptions.includes(v)), true,
    '时间下拉包含全部 8 个选项: ' + haveOptions.join(','));
 eq(html.indexOf('__DATA__') < 0, true, '数据占位符已被替换');
-eq((html.match(/const DATA = \[/g) || []).length, 1, 'DATA 只注入一次');
+eq((html.match(/const EMBEDDED = \[/g) || []).length, 1, '内嵌数据在静态模式下只注入一次');
 
 for (const need of ['id="reToggle"', 'id="err"', 'class="toggle"', 'mark {', 'setRich(',
                     'setRegexMode(', 'readStateFromUI()']) {
@@ -418,7 +419,7 @@ eq(bigPlaced.length >= plainLayout.length * 0.85, true,
    `随机化没有明显牺牲能摆下的词数（${bigPlaced.length} vs ${plainLayout.length}）`);
 eq(/seededRandom\(/.test(html), true, '随机流是带种子的，不依赖 Math.random');
 eq((html.match(/Math\.random\(\)/g) || []).length, 2,
-   'Math.random 只用在两处：页面加载时的初始相位、「重新摆放」按钮');
+   'Math.random 只用在两处：词云初始相位 + 「重新摆放」');
 eq(/cloudPhase:\s*Math\.random\(\)\s*\*\s*Math\.PI\s*\*\s*2/.test(html), true,
    '初始相位每次打开页面都随机，所以词云不会每次都长一样');
 eq(/state\.cloudPhase\s*=\s*Math\.random\(\)/.test(html), true,
@@ -509,6 +510,81 @@ try {
   compileErr = e.message;
 }
 eq(compileErr, '', '整段脚本语法正确' + (compileErr ? `（${compileErr}）` : ''));
+
+console.log('\n--- TODO：增删改归服务端管（这里只测展示用的纯逻辑）---');
+// 规则只写一遍：去重、切换完成、删除这些都在 Python 侧实现，
+// 由 test_server.py 用真实 HTTP 请求验证。前端这里不再重复实现，
+// 所以也不该再出现这些函数——下面几条就是防止它们被重新加回来。
+for (const gone of ['function todoAdd(', 'function todoToggle(', 'function todoRemove(',
+                    'function todoUpdate(', 'function todoMerge(', 'function todoNewItem(']) {
+  eq(html.indexOf(gone), -1, `前端不再自己实现: ${gone}`);
+}
+eq(html.indexOf('localStorage'), -1, '完全不依赖浏览器本地存储');
+eq(/const MODE = "__MODE__"|const MODE = "(server|static)"/.test(html), true,
+   '有 server / static 两种模式开关');
+eq(html.indexOf('/api/todos') >= 0, true, 'TODO 走 /api/todos 接口');
+eq(html.indexOf('/api/rows') >= 0, true, '记录走 /api/rows 接口');
+
+console.log('\n--- TODO：计数 / 排序 / 筛选 / 标签 ---');
+const T = (id, now, text, done, tag) => ({
+  id: id, kind: 'text', text: text, url: '', title: '', tag: tag || '',
+  done: !!done, created: new Date(now).toISOString(), doneAt: null,
+});
+const mixed = [
+  T('a', 1000, 'a', true, 'x'),
+  T('c', 3000, 'c', false, 'y'),
+  T('b', 2000, 'b', false, 'x'),
+];
+eq(mod.todoCounts(mixed), { total: 3, done: 1, open: 2 }, '计数正确');
+eq(mod.todoSort(mixed).map(t => t.text), ['c', 'b', 'a'],
+   '未完成在前，同组内按创建时间倒序');
+eq(mod.todoFilter(mixed, 'open').map(t => t.text), ['c', 'b'], '筛选未完成');
+eq(mod.todoFilter(mixed, 'done').map(t => t.text), ['a'], '筛选已完成');
+eq(mod.todoFilter(mixed, 'all').length, 3, '全部');
+eq(mod.todoFilter(mixed, 'open') !== mixed, true, '筛选返回新数组，不改动原列表');
+eq(mod.todoTags(mixed), ['x', 'y'], '标签按出现次数排序');
+eq(mod.todoTags([{ tag: '' }, { tag: 'a' }, { tag: 'a' }, { tag: 'b' }]), ['a', 'b'],
+   '空标签不计入');
+
+console.log('\n--- TODO：导出 / 导入 ---');
+const json = mod.todoToJSON(mixed);
+const round = mod.todoFromJSON(json);
+eq(round.ok, true, '自己导出的能自己读回来');
+eq(round.items.length, 3, '条目数一致');
+eq(round.skipped, 0, '没有跳过任何条目');
+eq(round.items.map(t => t.text).sort(), ['a', 'b', 'c'], '内容一致');
+
+eq(mod.todoFromJSON('{ 这不是 json').ok, false, '坏 JSON 不会崩，返回 ok=false');
+eq(mod.todoFromJSON('{"items":"not-an-array"}').ok, false, '结构不对也返回 ok=false');
+const salvaged = mod.todoFromJSON('[{"kind":"text","text":"ok"},{"kind":"text","text":""},null,42]');
+eq(salvaged.ok, true, '含废条目时整体仍然算成功');
+eq(salvaged.items.length, 1, '能救回来的只有 1 条');
+eq(salvaged.skipped, 3, '跳过 3 条废条目并如实计数');
+eq(mod.todoFromJSON('[]').ok, true, '空数组是合法的');
+eq(mod.todoFromJSON('[{"kind":"url","url":"https://a.com"}]').items[0].kind, 'url',
+   'url 类型能识别');
+
+console.log(fails ? `\n失败 ${fails} 项` : '\n全部通过');
+process.exit(fails ? 1 : 0);
+for (const need of ['id="todoView"', 'id="todoBadge"', 'id="todoText"', 'id="todoTag"',
+                    'id="todoTagList"', 'id="todoAddBtn"', 'id="todoFilter"',
+                    'id="todoList"', 'id="todoStat"', 'id="todoWarn"',
+                    'id="todoExport"', 'id="todoImport"', 'id="todoFile"',
+                    'id="refreshBtn"', 'id="refreshSync"',
+                    'data-view="todo"', 'data-filter="open"', "className = 'todoAdd'"]) {
+  eq(html.indexOf(need) >= 0, true, `页面包含: ${need}`);
+}
+eq(html.indexOf('__TODO_LOGIC_START__') >= 0, true, 'TODO 逻辑有独立标记可测');
+
+console.log('\n--- 服务模式 vs 静态模式 ---');
+eq(/const MODE = "__MODE__"/.test(html), true, '模板里留了模式占位符');
+eq(/const EMBEDDED = __DATA__/.test(html), true, '模板里留了数据占位符');
+eq(html.indexOf('/api/meta') >= 0 && html.indexOf('/api/sync') >= 0, true,
+   '有 meta 和 sync 两个接口调用（刷新按钮会用到）');
+eq(/credentials:\s*'same-origin'/.test(html), true, '接口请求带上同源凭据');
+eq(/X-Token/.test(html), true, '接口请求带令牌头');
+eq(html.indexOf('静态导出的页面是只读的') >= 0, true,
+   '静态模式下会明确说明 TODO 不可用，而不是假装能存');
 
 console.log(fails ? `\n失败 ${fails} 项` : '\n全部通过');
 process.exit(fails ? 1 : 0);

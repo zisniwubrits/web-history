@@ -96,6 +96,94 @@ def main() -> int:
                           variant.resolve()), True,
            f"归档目录写成 {variant} 也能正确判断")
 
+    print("\n--- exclude.txt（持久配置，计划任务也会读）---")
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="wh-excl-"))
+    try:
+        eq(ha.load_exclude_patterns(tmp), [], "没有配置文件时返回空")
+        eq(ha.exclude_file(tmp).name, "exclude.txt", "配置文件名")
+
+        ha.save_exclude_patterns(tmp, ["bili-history.html"])
+        eq(ha.load_exclude_patterns(tmp), ["bili-history.html"], "写得进也读得出")
+
+        # 注释和空行必须被忽略
+        ha.exclude_file(tmp).write_text(
+            "# 这是注释\n\n  bili-history.html  \n\n# 又一条注释\n其它关键字\n",
+            encoding="utf-8")
+        eq(ha.load_exclude_patterns(tmp), ["bili-history.html", "其它关键字"],
+           "注释、空行、首尾空格都被正确忽略")
+
+        # 过滤函数要自动读这份配置，不需要命令行参数
+        keep = ha.make_url_filter(tmp)
+        bili_url = ("file:///C:/Users/%E6%9B%BE%E5%AD%90%E7%91%9C/AppData/Local/"
+                    "bili-history-archive/exports/bili-history.html")
+        eq(keep(bili_url), False, "exclude.txt 里的关键字自动生效")
+        eq(keep("https://www.bilibili.com/"), True, "没被关键字命中的照常归档")
+
+        # 大小写不敏感
+        ha.save_exclude_patterns(tmp, ["BILI-History.HTML"])
+        eq(ha.make_url_filter(tmp)(bili_url), False, "关键字匹配不区分大小写")
+
+        # 和命令行 --exclude 叠加，互不覆盖
+        ha.save_exclude_patterns(tmp, ["bili-history.html"])
+        keep2 = ha.make_url_filter(tmp, ["另一个关键字"])
+        eq(keep2(bili_url), False, "配置文件里的关键字仍然生效")
+        eq(keep2("https://x.com/另一个关键字/y"), False, "命令行的关键字也生效")
+        eq(keep2("https://normal.example/"), True, "两者都不命中时照常归档")
+
+        # 清空
+        ha.save_exclude_patterns(tmp, [])
+        eq(ha.load_exclude_patterns(tmp), [], "清空之后没有关键字")
+        eq(ha.make_url_filter(tmp)(bili_url), True, "清空后该链接不再被排除")
+
+        # 归档目录本身还在不在（tmp 下没有 self 目录，所以全都该放行）
+        eq(ha.make_url_filter(tmp)("file:///E:/anywhere/x.html"), True,
+           "没配关键字时，非归档目录的本地文件照常归档")
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp, ignore_errors=True)
+
+    print("\n--- 服务模式页面（http://127.0.0.1:端口/history/）---")
+    # 这是真实踩过的坑：静态快照是 file:// 能认出来，但改成服务模式之后
+    # 页面地址变成 http://127.0.0.1:端口/?t=令牌，同样会进浏览器历史，
+    # 而端口和令牌每次都变，光靠它们认不出来——所以固定了一个 /history/ 路径。
+    eq(ha.is_viewer_url("http://127.0.0.1:50070/history/?t=84zx11UpxHRzj2npVrhuxyqw"),
+       True, "新版固定路径")
+    eq(ha.is_viewer_url("http://127.0.0.1:50070/history/"), True, "不带令牌也认")
+    eq(ha.is_viewer_url("http://localhost:8080/history/?x=1"), True, "localhost 同样算")
+    eq(ha.is_viewer_url("http://[::1]:9000/history/"), True, "IPv6 回环也算")
+    eq(ha.is_viewer_url("http://127.0.0.1:8731/?t=bDDgcmUjYxcBN-DY9vxsu_n-"), True,
+       "旧版形式（根路径 + 令牌）也认，免得升级前的记录留在库里")
+    eq(ha.is_viewer_url("https://127.0.0.1:8731/?t=bDDgcmUjYxcBN-DY9vxsu_n-"), True,
+       "https 的旧版形式")
+
+    print("\n--- 这些本地服务不能被误伤（重要）---")
+    for url, why in [
+        ("http://127.0.0.1:3080/", "DSH GUI"),
+        ("http://localhost:3000/", "Open WebUI"),
+        ("http://localhost:3000/auth", "Open WebUI 登录页"),
+        ("http://localhost:5173/learn", "CET-Learn"),
+        ("http://localhost:8000/reader.html?ch=21", "阅读器"),
+        ("http://127.0.0.1:55101/?redirect_uri=vscode%3A%2F%2F", "VS Code 登录回调"),
+        ("http://127.0.0.1:8081/health", "健康检查端点"),
+        ("http://localhost:3000/?t=abc", "t 太短，不是本工具的令牌"),
+        ("https://127.0.0.1.evil.com/history/", "域名伪装"),
+        ("https://example.com/history/", "外网的 /history/"),
+        ("http://192.168.1.5:5000/history/", "局域网地址"),
+        ("file:///E:/x/history/index.html", "file 协议另走一条规则"),
+        ("", "空串"),
+    ]:
+        eq(ha.is_viewer_url(url), False, f"不误伤：{why}")
+
+    print("\n--- 过滤器把服务页面也排掉 ---")
+    keep3 = ha.make_url_filter(ARCHIVE)
+    eq(keep3("http://127.0.0.1:50070/history/?t=abc123456789012345678"), False,
+       "服务页面默认被排除")
+    eq(keep3("http://localhost:5173/learn"), True, "别人的本地服务照常归档")
+    eq(ha.make_url_filter(ARCHIVE, exclude_self=False)(
+        "http://127.0.0.1:50070/history/"), True,
+       "--no-self-exclude 时不再排除服务页面")
+
     print(f"\n{'失败 %d 项' % FAILS if FAILS else '全部通过'}")
     return 1 if FAILS else 0
 

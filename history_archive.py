@@ -36,16 +36,22 @@ from __future__ import annotations
 import argparse
 import configparser
 import csv
+import gzip
 import hashlib
+import hmac
 import json
 import os
+import re
+import secrets
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, parse_qsl, unquote, urlsplit
 
 # --------------------------------------------------------------------------
 # 常量
@@ -198,6 +204,21 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     new_titles    INTEGER DEFAULT 0,
     message       TEXT
 );
+
+-- TODO 列表。存在归档库里而不是浏览器里：跟着 backup 一起备份，
+-- 换浏览器/清缓存也不会丢，静态导出的页面只是只读快照。
+CREATE TABLE IF NOT EXISTS todos (
+    id       TEXT PRIMARY KEY,
+    kind     TEXT NOT NULL DEFAULT 'text',   -- 'url' 记一条网页，'text' 是自由文字
+    text     TEXT NOT NULL DEFAULT '',
+    url      TEXT NOT NULL DEFAULT '',
+    title    TEXT NOT NULL DEFAULT '',
+    tag      TEXT NOT NULL DEFAULT '',
+    done     INTEGER NOT NULL DEFAULT 0,
+    created  TEXT NOT NULL,
+    done_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_todos_done ON todos(done);
 """
 
 INSERT_RAW_SQL = """
@@ -379,16 +400,94 @@ def is_self_url(url: str, archive_dir: Path) -> bool:
     return path == base or path.startswith(base + "\\")
 
 
+EXCLUDE_FILE_NAME = "exclude.txt"
+
+
+def exclude_file(archive_dir: Path) -> Path:
+    return archive_dir / EXCLUDE_FILE_NAME
+
+
+def load_exclude_patterns(archive_dir: Path) -> list[str]:
+    """读 <归档目录>/exclude.txt 里的额外排除关键字。
+
+    存在的意义：计划任务跑的是不带参数的 sync，命令行上的 --exclude 用不上，
+    所以需要一份会被自动读取的持久配置。一行一个关键字，空行和 # 开头的行忽略。
+    """
+    path = exclude_file(archive_dir)
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            out.append(line)
+    return out
+
+
+def save_exclude_patterns(archive_dir: Path, patterns: list[str]) -> Path:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    path = exclude_file(archive_dir)
+    body = [
+        "# 归档时额外排除的链接关键字，一行一个，包含即排除（不区分大小写）。",
+        "# 用 `python history_archive.py exclude 关键字` 增删，别手改也行。",
+        "# 归档目录下的链接（本工具自己的导出页面）已经默认排除，不用写在这里。",
+        "",
+    ]
+    body.extend(patterns)
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    return path
+
+
+VIEWER_PATH = "/history/"
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,40}$")
+
+
+def is_viewer_url(url: str) -> bool:
+    """判断链接是不是本工具**服务模式**自己的页面。
+
+    服务模式的地址形如 http://127.0.0.1:50070/history/?t=<令牌>，
+    它被打开后同样会进浏览器历史——这点跟 file:// 的静态快照一样，
+    所以也要排除。用固定路径 /history/ 来认，端口和令牌每次都变，认不得。
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if (parts.scheme or "").lower() not in ("http", "https"):
+        return False
+    if (parts.hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
+        return False
+    path = parts.path or "/"
+    if path.startswith(VIEWER_PATH):
+        return True
+    # 早期版本把页面放在根路径，只带一个 ?t=<令牌>。令牌形状够特别，
+    # 用来兜底识别，免得升级前的记录一直留在库里。
+    if path != "/":
+        return False
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key == "t" and _TOKEN_RE.match(value or ""):
+            return True
+    return False
+
+
 def make_url_filter(archive_dir: Path, extra_patterns: list[str] | None = None,
                     exclude_self: bool = True):
     """返回 keep_url(url) —— True 表示这条记录要归档。
 
-    默认排除归档目录下的一切（自己的导出页面），另外可以用 --exclude 追加关键字。
+    排除规则 = 归档目录下的链接 + 本工具服务页面（默认）
+             + exclude.txt 里的关键字 + 命令行传进来的关键字。
     """
     patterns = [p.lower() for p in (extra_patterns or []) if p]
+    patterns.extend(p.lower() for p in load_exclude_patterns(archive_dir))
 
     def keep_url(url: str) -> bool:
         if exclude_self and is_self_url(url, archive_dir):
+            return False
+        if exclude_self and is_viewer_url(url):
             return False
         if patterns:
             low = url.lower()
@@ -605,12 +704,16 @@ def has_expected_visit_key(conn: sqlite3.Connection) -> bool:
     return False
 
 
-def open_archive(archive_dir: Path, *, create: bool = True) -> sqlite3.Connection:
+def open_archive(archive_dir: Path, *, create: bool = True,
+                 threaded: bool = False) -> sqlite3.Connection:
     archive_dir.mkdir(parents=True, exist_ok=True)
     db_path = archive_dir / "archive.sqlite"
     if not create and not db_path.exists():
         raise SystemExit(f"归档库还不存在: {db_path}\n请先运行: python history_archive.py sync")
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    # 服务模式下 ThreadingHTTPServer 每个请求一个线程，连接必须允许跨线程；
+    # 所有访问都在同一把锁里串行化，所以是安全的。
+    conn = sqlite3.connect(db_path, isolation_level=None,
+                           check_same_thread=not threaded)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -1529,6 +1632,42 @@ HTML_TEMPLATE = r"""<!doctype html>
               border:1px solid var(--border-l2); border-radius:var(--radius-sm);
               transition:opacity var(--dur) var(--ease); }
 
+  /* ---- TODO ---- */
+  #todoView { padding:20px 0 48px; }
+  .todoBar { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+             margin-bottom:10px; }
+  #todoText { flex:1 1 260px; min-width:180px; }
+  #todoTag { width:150px; }
+  .todoList { display:flex; flex-direction:column; gap:6px; }
+  .todoItem { display:flex; gap:10px; align-items:flex-start; padding:10px 12px;
+              background:var(--bg-layer-1); border:1px solid var(--border-l1);
+              border-radius:var(--radius-sm); }
+  .todoItem:hover { border-color:var(--border-l2); }
+  .todoItem.done .todoTitle { color:var(--label-caption); text-decoration:line-through; }
+  .todoItem input[type=checkbox] { width:16px; height:16px; margin-top:3px;
+                                   flex:0 0 auto; accent-color:var(--accent); }
+  .todoBody { flex:1 1 auto; min-width:0; }
+  .todoTitle { color:var(--label-primary); word-break:break-all; }
+  .todoTitle a { color:var(--accent); }
+  .todoMeta { font-size:12px; line-height:18px; color:var(--label-caption);
+              margin-top:2px; }
+  .todoTag { display:inline-block; padding:0 8px; margin-right:6px; height:18px;
+             line-height:18px; font-size:11px; border-radius:9px;
+             background:var(--bg-layer-3); color:var(--label-secondary); }
+  .todoItem .ctl { display:flex; gap:4px; flex:0 0 auto; }
+  .todoItem .ctl button { height:24px; padding:0 9px; font-size:12px;
+                          border-radius:12px; }
+  .todoEmpty { padding:44px 12px; text-align:center; color:var(--label-caption); }
+  .todoEdit { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  .todoEdit input { height:28px; }
+  .todoEdit input.eText { flex:1 1 200px; }
+  .todoEdit input.eTag { width:120px; }
+  .todoEdit button { height:28px; padding:0 10px; font-size:12px; }
+  td.br button.todoAdd { height:20px; min-width:20px; padding:0 5px; font-size:12px;
+                         line-height:1; border-radius:10px; margin-left:6px;
+                         vertical-align:middle; }
+  td.br button.todoAdd.on { color:var(--accent); border-color:var(--accent); }
+
   /* 窄屏：收紧留白，并让固定列让出空间 */
   @media (max-width: 860px) {
     :root { --pad: 12px; }
@@ -1549,6 +1688,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     <span class="seg" id="viewToggle">
       <button type="button" data-view="list" class="on">列表</button>
       <button type="button" data-view="cloud">词云</button>
+      <button type="button" data-view="todo">TODO <span id="todoBadge"></span></button>
     </span>
   </h1>
 
@@ -1572,6 +1712,13 @@ HTML_TEMPLATE = r"""<!doctype html>
       </optgroup>
     </select>
     <button id="clear">清空筛选</button>
+    <span class="seg" id="refreshSeg" style="margin-left:auto">
+      <label class="hint" style="display:flex;align-items:center;gap:5px;padding-left:4px">
+        <input type="checkbox" id="refreshSync" style="width:14px;height:14px">
+        先同步
+      </label>
+      <button id="refreshBtn" type="button" title="重新从归档库读取">刷新</button>
+    </span>
   </div>
 
   <div class="err" id="err" hidden></div>
@@ -1627,10 +1774,55 @@ HTML_TEMPLATE = r"""<!doctype html>
     <div id="cloudTip"></div>
   </div>
  </section>
+
+ <section id="todoView" hidden>
+  <div class="todoBar">
+    <input id="todoText" placeholder="写一条 TODO，回车添加…" autocomplete="off">
+    <input id="todoTag" placeholder="标签（可选）" list="todoTagList" autocomplete="off">
+    <datalist id="todoTagList"></datalist>
+    <button id="todoAddBtn" type="button">添加</button>
+  </div>
+  <div class="todoBar">
+    <span class="seg" id="todoFilter">
+      <button type="button" data-filter="open" class="on">未完成</button>
+      <button type="button" data-filter="all">全部</button>
+      <button type="button" data-filter="done">已完成</button>
+    </span>
+    <button id="todoExport" type="button">导出 JSON</button>
+    <button id="todoImport" type="button">导入 JSON</button>
+    <input type="file" id="todoFile" accept=".json,application/json" hidden>
+    <button id="todoClearDone" type="button">清空已完成</button>
+    <span class="hint" id="todoStat"></span>
+  </div>
+  <div class="err" id="todoWarn" hidden></div>
+  <div class="todoList" id="todoList"></div>
+ </section>
 </main>
 <script>
-const DATA = __DATA__;
-const PAGE = 400;
+// server 模式：数据由 boot() 从 /api/rows 拉，TODO 走 /api/todos 写进归档库。
+// static 模式：__DATA__ 在生成时被替换成完整数组，页面自包含、只读、离线可看。
+const MODE = "__MODE__";
+const EMBEDDED = __DATA__;
+const TOKEN = new URLSearchParams(location.search).get('t') || '';
+let DATA = [];
+let PAGE = 400;
+
+// 统一的接口调用：带上令牌，出错就抛出可读的原因
+async function api(path, body){
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { 'Content-Type': 'application/json', 'X-Token': TOKEN }
+                  : { 'X-Token': TOKEN },
+    body: body ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin',
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (!res.ok || !data || data.ok === false) {
+    throw new Error((data && data.error) || ('HTTP ' + res.status));
+  }
+  return data;
+}
 
 const tbody   = document.getElementById('tbody');
 const statEl  = document.getElementById('stat');
@@ -1655,6 +1847,22 @@ const cloudHint  = document.getElementById('cloudHint');
 const cloudWrap  = document.getElementById('cloudWrap');
 const cloud      = document.getElementById('cloud');
 const cloudTip   = document.getElementById('cloudTip');
+const todoView   = document.getElementById('todoView');
+const todoBadge  = document.getElementById('todoBadge');
+const todoText   = document.getElementById('todoText');
+const todoTag    = document.getElementById('todoTag');
+const todoTagList = document.getElementById('todoTagList');
+const todoAddBtn = document.getElementById('todoAddBtn');
+const todoFilterEl = document.getElementById('todoFilter');
+const todoList   = document.getElementById('todoList');
+const todoStat   = document.getElementById('todoStat');
+const todoWarn   = document.getElementById('todoWarn');
+const todoExport = document.getElementById('todoExport');
+const todoImport = document.getElementById('todoImport');
+const todoFile   = document.getElementById('todoFile');
+const todoClearDone = document.getElementById('todoClearDone');
+const refreshBtn = document.getElementById('refreshBtn');
+const refreshSync = document.getElementById('refreshSync');
 const condRow = document.getElementById('condRow');
 const condLabel = document.getElementById('condLabel');
 const condHint  = document.getElementById('condHint');
@@ -1668,8 +1876,10 @@ const state = { q:'', browser:'', time:'all', day:'', from:'', to:'', useRegex:f
                 view:'list', cloudSource:'title', cloudTop:200,
                 // 初始相位每次打开页面都随机：否则布局写死成同一个，看几次就腻。
                 // 同一次会话里相位不变，所以切筛选、搜关键词时词云不会重排。
-                cloudPhase: Math.random() * Math.PI * 2 };
-let filtered = DATA, shown = 0, currentMatcher = null;
+                cloudPhase: Math.random() * Math.PI * 2,
+                todoFilter:'open', todoTag:'' };
+let filtered = [], shown = 0, currentMatcher = null;
+let DAY_MIN = '', DAY_MAX = '';
 
 // ==========================================================================
 // 纯筛选逻辑（不碰 DOM，方便单独测试）
@@ -2125,21 +2335,102 @@ function cloudColor(rank, total){
 }
 /* __WORDCLOUD_LOGIC_END__ */
 
+// ==========================================================================
+// TODO：纯逻辑（不碰 DOM、不碰网络，可以单独测）
+// ==========================================================================
+/* __TODO_LOGIC_START__ */
+// 注意职责划分：**增删改由服务端负责**（Python 里那份才是权威实现），
+// 前端这里只保留「怎么显示」和「导入导出格式」两件事，
+// 避免同一套规则在两边各写一遍、日后改歪。
+function todoCounts(items){
+  const list = items || [];
+  let done = 0;
+  for (const t of list) if (t.done) done++;
+  return { total: list.length, done: done, open: list.length - done };
+}
+
+// 未完成在前；同组内按创建时间倒序（新建的在上面）
+function todoSort(items){
+  return (items || []).slice().sort((a, b) => {
+    if (!!a.done !== !!b.done) return a.done ? 1 : -1;
+    return String(b.created).localeCompare(String(a.created));
+  });
+}
+
+function todoFilter(items, mode){
+  const list = todoSort(items);
+  if (mode === 'open') return list.filter(t => !t.done);
+  if (mode === 'done') return list.filter(t => t.done);
+  return list;
+}
+
+// 标签集合，按出现次数排序，供输入框做提示
+function todoTags(items){
+  const n = new Map();
+  for (const t of (items || [])) {
+    if (t.tag) n.set(t.tag, (n.get(t.tag) || 0) + 1);
+  }
+  return [...n.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+                         .map(e => e[0]);
+}
+
+function todoToJSON(items){
+  return JSON.stringify({ version: 1, exported: new Date().toISOString(),
+                          items: todoSort(items || []) }, null, 2);
+}
+
+// 导入前先在前端过一遍：格式不对不算崩，能救回多少算多少，并如实报告丢了几条
+function todoFromJSON(text){
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, items: [], skipped: 0, error: '不是合法的 JSON：' + e.message };
+  }
+  const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : null);
+  if (!arr) return { ok: false, items: [], skipped: 0,
+                     error: '结构不对：需要 {items:[...]} 或一个数组' };
+
+  const items = [];
+  let skipped = 0;
+  for (const it of arr) {
+    if (!it || typeof it !== 'object') { skipped++; continue; }
+    const kind = it.kind === 'url' ? 'url' : 'text';
+    const text = String(it.text || '').trim();
+    const url = String(it.url || '');
+    if (kind === 'url' ? !url : !text) { skipped++; continue; }
+    items.push({
+      id: String(it.id || ''),
+      kind: kind,
+      text: text,
+      url: url,
+      title: String(it.title || ''),
+      tag: String(it.tag || '').trim(),
+      done: !!it.done,
+      created: String(it.created || ''),
+      doneAt: it.doneAt || null,
+    });
+  }
+  return { ok: true, items: items, skipped: skipped, error: '' };
+}
+/* __TODO_LOGIC_END__ */
+
 /* __FILTER_LOGIC_END__ */
 // ==========================================================================
 // 界面
 // ==========================================================================
-const DAY_MIN = DATA.reduce((m, r) => (r[10] && r[10] < m ? r[10] : m), '9999-99-99');
-const DAY_MAX = DATA.reduce((m, r) => (r[10] && r[10] > m ? r[10] : m), '0000-00-00');
-
-(function init(){
-  // 浏览器下拉
+// 数据到位之后再跑一次界面初始化（server 模式下要等 fetch 回来）
+function initUI(){
+  // 浏览器下拉（重复调用时先清掉旧的）
+  while (brEl.options.length > 1) brEl.remove(1);
   const set = [...new Set(DATA.map(r => r[2]))].sort();
   for (const b of set) {
     const o = document.createElement('option');
     o.value = b; o.textContent = b; brEl.appendChild(o);
   }
   // 日期输入框限制在归档实际覆盖的范围内，省得选到没数据的日子
+  DAY_MIN = DATA.reduce((m, r) => (r[10] && r[10] < m ? r[10] : m), '9999-99-99');
+  DAY_MAX = DATA.reduce((m, r) => (r[10] && r[10] > m ? r[10] : m), '0000-00-00');
   for (const el of [dayEl, fromEl, toEl]) {
     el.min = DAY_MIN; el.max = DAY_MAX;
   }
@@ -2148,7 +2439,7 @@ const DAY_MAX = DATA.reduce((m, r) => (r[10] && r[10] > m ? r[10] : m), '0000-00
   toEl.value = DAY_MAX;
   totalEl.textContent = '共 ' + DATA.length.toLocaleString() + ' 条 · 数据范围 ' +
                         DAY_MIN + ' ~ ' + DAY_MAX;
-})();
+}
 
 // 根据当前时间模式，显示对应的输入框，并给出说明文字
 function syncTimeControls(){
@@ -2270,6 +2561,13 @@ function renderMore(){
     tdX.textContent = (r[7] || '') + (r[9] ? ' · 输入' : '') +
                       (r[8] ? ' · ' + (r[8] / 1000).toFixed(1) + 's' : '') +
                       (r[11] > 1 ? ' · ×' + r[11] : '');
+    const todoBtn = document.createElement('button');
+    todoBtn.type = 'button';
+    todoBtn.className = 'todoAdd';
+    todoBtn.textContent = '＋';
+    todoBtn.title = '把这一行加进 TODO（标签用 TODO 页里填的那个）';
+    todoBtn.onclick = (ev) => { ev.stopPropagation(); addRowToTodo(r, todoBtn); };
+    tdX.appendChild(todoBtn);
 
     tr.append(tdT, tdB, tdU, tdX);
     frag.appendChild(tr);
@@ -2313,6 +2611,7 @@ function update(){
   renderChips();
   syncHeaderHeight();   // 条件行/标签行会改变顶部栏高度，表头偏移要跟着更新
   scheduleCloud();      // 词云视图下才会真正重算
+  if (state.view === 'todo') renderTodos();
 }
 
 function clearAll(){
@@ -2461,6 +2760,247 @@ cloud.addEventListener('click', (e) => {
   setView('list');
 });
 
+// ==========================================================================
+// TODO：存储与渲染
+// ==========================================================================
+// TODO 存在归档库里，由服务端读写。页面不再自己存东西，
+// 所以换浏览器、清缓存都不影响，也会跟着 backup 一起被备份。
+let todos = [];
+
+function todoSetWarn(msg){
+  todoWarn.hidden = !msg;
+  todoWarn.textContent = msg || '';
+}
+
+function todoApply(list){
+  todos = list || [];
+  renderTodos();
+}
+
+async function todoCall(body){
+  if (MODE !== 'server') {
+    todoSetWarn('静态导出的页面是只读的，TODO 需要跑 serve 才有。');
+    return null;
+  }
+  try {
+    const res = await api('/api/todos', body);
+    todoApply(res.todos);
+    todoSetWarn(res.message || (res.changed ? '' : '没有变化'));
+    return res;
+  } catch (e) {
+    todoSetWarn('操作失败：' + e.message);
+    return null;
+  }
+}
+
+async function todoLoad(){
+  if (MODE !== 'server') return;
+  try {
+    const res = await api('/api/todos');
+    todoApply(res.todos);
+  } catch (e) {
+    todoWarn.hidden = false;
+    todoWarn.textContent = '读取 TODO 失败：' + e.message;
+  }
+}
+
+function todoItemNode(t){
+  const row = document.createElement('div');
+  row.className = 'todoItem' + (t.done ? ' done' : '');
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = !!t.done;
+  cb.title = t.done ? '标记为未完成' : '标记为已完成';
+  cb.onchange = () => todoCall({ action: 'toggle', id: t.id });
+
+  const body = document.createElement('div');
+  body.className = 'todoBody';
+
+  const title = document.createElement('div');
+  title.className = 'todoTitle';
+  if (t.kind === 'url') {
+    const a = document.createElement('a');
+    a.href = t.url; a.target = '_blank'; a.rel = 'noreferrer noopener';
+    a.textContent = t.text || t.title || t.url;
+    title.appendChild(a);
+  } else {
+    title.textContent = t.text;
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'todoMeta';
+  if (t.tag) {
+    const tag = document.createElement('span');
+    tag.className = 'todoTag';
+    tag.textContent = t.tag;
+    meta.appendChild(tag);
+  }
+  const bits = [t.created ? t.created.slice(0, 16).replace('T', ' ') : ''];
+  if (t.kind === 'url' && t.title && t.text && t.text !== t.title) bits.push(t.title);
+  meta.appendChild(document.createTextNode(bits.filter(Boolean).join(' · ')));
+
+  body.append(title, meta);
+
+  const ctl = document.createElement('div');
+  ctl.className = 'ctl';
+  const edit = document.createElement('button');
+  edit.type = 'button'; edit.textContent = '编辑';
+  const del = document.createElement('button');
+  del.type = 'button'; del.textContent = '×'; del.title = '删除';
+
+  // 就地编辑：文字/备注 + 标签
+  edit.onclick = () => {
+    if (body.querySelector('.todoEdit')) return;
+    const box = document.createElement('div');
+    box.className = 'todoEdit';
+    const eText = document.createElement('input');
+    eText.className = 'eText';
+    eText.value = t.text;
+    eText.placeholder = '备注 / 正文';
+    const eTag = document.createElement('input');
+    eTag.className = 'eTag';
+    eTag.value = t.tag;
+    eTag.placeholder = '标签';
+    const eOk = document.createElement('button');
+    eOk.type = 'button'; eOk.textContent = '保存';
+    const eNo = document.createElement('button');
+    eNo.type = 'button'; eNo.textContent = '取消';
+    const apply = () => todoCall({ action: 'update', id: t.id,
+                                   patch: { text: eText.value.trim(),
+                                            tag: eTag.value.trim() } });
+    const cancel = () => box.remove();
+    eOk.onclick = apply;
+    eNo.onclick = cancel;
+    eText.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') apply();
+      if (ev.key === 'Escape') cancel();
+    });
+    eTag.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') apply();
+      if (ev.key === 'Escape') cancel();
+    });
+    box.append(eText, eTag, eOk, eNo);
+    body.appendChild(box);
+    eText.focus();
+  };
+  del.onclick = () => todoCall({ action: 'remove', id: t.id });
+
+  ctl.append(edit, del);
+  row.append(cb, body, ctl);
+  return row;
+}
+
+function renderTodos(){
+  const counts = todoCounts(todos);
+  todoBadge.textContent = counts.open ? String(counts.open) : '';
+  todoStat.textContent = counts.total
+    ? `${counts.open} 条未完成 / 共 ${counts.total} 条`
+    : '还没有任何 TODO';
+
+  // 标签提示
+  todoTagList.innerHTML = '';
+  for (const tag of todoTags(todos)) {
+    const o = document.createElement('option');
+    o.value = tag;
+    todoTagList.appendChild(o);
+  }
+
+  const list = todoFilter(todos, state.todoFilter);
+  todoList.innerHTML = '';
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'todoEmpty';
+    empty.textContent = state.todoFilter === 'done'
+      ? '还没有已完成的条目。'
+      : '还没有 TODO。可以在「列表」里点某一行的 ＋ 加入，也可以在上面直接写。';
+    todoList.appendChild(empty);
+  } else {
+    for (const t of list) todoList.appendChild(todoItemNode(t));
+  }
+
+  if (MODE !== 'server') {
+    todoSetWarn('这是静态导出的只读快照。要让 TODO 能保存并跟着归档库一起备份，'
+                + '请用：python history_archive.py serve');
+  }
+}
+
+// 从历史记录行加入 TODO
+function addRowToTodo(r, btn){
+  btn.textContent = '…';
+  todoCall({ action: 'add', item: {
+    kind: 'url', url: r[5], title: r[4] || '', text: r[4] || r[5], tag: state.todoTag,
+  } }).then(res => {
+    const ok = res && res.changed;
+    btn.textContent = ok ? '✓' : '已在';
+    btn.classList.add('on');
+    setTimeout(() => { btn.textContent = '＋'; btn.classList.remove('on'); }, 1200);
+  });
+}
+
+function addTodoFromInput(){
+  const text = todoText.value.trim();
+  const tag = todoTag.value.trim();
+  if (!text) { todoSetWarn('内容不能为空。'); return; }
+  const url = /^https?:\/\/\S+$/i.test(text) ? text : '';
+  state.todoTag = tag;
+  todoText.value = '';
+  todoCall({ action: 'add', item: {
+    kind: url ? 'url' : 'text', text: text, url: url, tag: tag, title: '',
+  } }).then(res => {
+    if (res && res.changed) todoText.focus();
+  });
+}
+
+todoAddBtn.addEventListener('click', addTodoFromInput);
+todoText.addEventListener('keydown', (e) => { if (e.key === 'Enter') addTodoFromInput(); });
+todoTag.addEventListener('keydown', (e) => { if (e.key === 'Enter') addTodoFromInput(); });
+todoTag.addEventListener('change', () => { state.todoTag = todoTag.value.trim(); });
+
+todoFilterEl.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  state.todoFilter = b.dataset.filter;
+  for (const x of todoFilterEl.querySelectorAll('button')) x.classList.toggle('on', x === b);
+  renderTodos();
+});
+
+todoClearDone.addEventListener('click', () => {
+  const n = todoCounts(todos).done;
+  if (!n) { todoSetWarn('没有已完成的条目。'); return; }
+  if (!confirm('确定删除 ' + n + ' 条已完成的 TODO？')) return;
+  todoCall({ action: 'clear_done' });
+});
+
+todoExport.addEventListener('click', () => {
+  const blob = new Blob([todoToJSON(todos)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'todos.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+
+todoImport.addEventListener('click', () => todoFile.click());
+todoFile.addEventListener('change', () => {
+  const f = todoFile.files && todoFile.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const parsed = todoFromJSON(String(reader.result));
+    if (!parsed.ok) { todoSetWarn('导入失败：' + parsed.error); return; }
+    todoCall({ action: 'import', items: parsed.items }).then(res => {
+      if (res && parsed.skipped) {
+        todoSetWarn((res.message || '') + `，另有 ${parsed.skipped} 条格式不对被跳过`);
+      }
+    });
+  };
+  reader.readAsText(f);
+  todoFile.value = '';
+});
+
 function setView(view){
   state.view = view;
   for (const b of viewToggle.querySelectorAll('button')) {
@@ -2468,6 +3008,7 @@ function setView(view){
   }
   listView.hidden = view !== 'list';
   cloudView.hidden = view !== 'cloud';
+  todoView.hidden = view !== 'todo';
   cloudTip.style.opacity = '0';
   update();
 }
@@ -2508,8 +3049,63 @@ window.addEventListener('resize', () => {
   if (state.view === 'cloud') scheduleCloud();
 });
 
-readStateFromUI();
-update();
+// 启动：先把数据弄到手，再初始化界面
+async function boot(){
+  if (MODE !== 'server') {
+    DATA = EMBEDDED || [];
+    document.getElementById('refreshBtn').hidden = true;
+    initUI();
+    readStateFromUI();
+    update();
+    renderTodos();
+    return;
+  }
+  try {
+    await reloadRows(false);
+  } catch (e) {
+    document.body.insertAdjacentHTML('afterbegin',
+      '<div class="err" style="margin:16px 20px">读取归档数据失败：' + e.message + '</div>');
+    return;
+  }
+  initUI();
+  readStateFromUI();
+  update();
+  await todoLoad();
+}
+
+async function reloadRows(doSync){
+  const res = doSync ? await api('/api/sync', {}) : await api('/api/rows');
+  DATA = res.rows || [];
+  if (!DATA.length) return;
+  initUI();
+  update();
+  if (doSync) {
+    const meta = (await api('/api/meta')).meta;
+    totalEl.textContent = '共 ' + DATA.length.toLocaleString() + ' 条 · 数据范围 ' +
+      meta.first_day + ' ~ ' + meta.last_day;
+  }
+}
+
+refreshBtn.addEventListener('click', async () => {
+  const original = refreshBtn.textContent;
+  const doSync = refreshSync.checked;
+  refreshBtn.disabled = true;
+  refreshBtn.textContent = doSync ? '同步中…' : '刷新中…';
+  try {
+    await reloadRows(doSync);
+    refreshBtn.textContent = '已更新';
+  } catch (e) {
+    refreshBtn.textContent = '失败';
+    document.getElementById('err').hidden = false;
+    document.getElementById('err').textContent = '刷新失败：' + e.message;
+  }
+  setTimeout(() => {
+    refreshBtn.textContent = original;
+    refreshBtn.disabled = false;
+  }, 1200);
+});
+
+boot();
 </script>
 </body>
 </html>
@@ -2586,8 +3182,8 @@ def cmd_export(args) -> int:
                 break
             data.append(list(row))
         path = out_dir / "history.html"
-        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        path.write_text(HTML_TEMPLATE.replace("__DATA__", payload), encoding="utf-8")
+        path.write_text(render_viewer_html(args.archive, mode="static", rows=data),
+                        encoding="utf-8")
         written.append(path)
         extra = "" if len(data) < html_limit else f"（已截断到 {human(html_limit)} 条，完整数据看 CSV/JSONL）"
         print(f"[OK] HTML  {human(len(data))} 条 -> {path}{extra}")
@@ -2623,42 +3219,50 @@ def open_in_browser(path: Path) -> bool:
         return False
 
 
+def render_viewer_html(archive_dir: Path, mode: str = "static",
+                       rows: list | None = None) -> str:
+    """生成查看页面。
+
+    mode=server：不内嵌数据，由页面自己去 /api/rows 拉，TODO 可读写。
+    mode=static：把 rows 内嵌进去，得到一个自包含、可离线、只读的快照。
+    """
+    payload = json.dumps(rows if rows is not None else [],
+                         ensure_ascii=False, separators=(",", ":"))
+    return (HTML_TEMPLATE
+            .replace("__DATA__", payload)
+            .replace("__MODE__", "server" if mode == "server" else "static"))
+
+
 def cmd_view(args) -> int:
-    out_dir: Path = args.out or (args.archive / "exports")
-    ns = argparse.Namespace(
+    """默认起本地服务（可读写 TODO）；--static 退回生成自包含的只读快照。"""
+    if getattr(args, "static", False):
+        out_dir: Path = args.out or (args.archive / "exports")
+        ns = argparse.Namespace(
+            archive=args.archive, out=out_dir, format="html",
+            since=args.since, until=args.until, browser=args.browser,
+            contains=args.contains, limit=args.limit,
+            html_limit=args.html_limit, snapshot=False,
+        )
+        rc = cmd_export(ns)
+        if rc != 0:
+            return rc
+        page = out_dir / "history.html"
+        if not page.exists():
+            print(f"[x] 没有生成 {page}")
+            return 1
+        if args.no_open:
+            print(f"\n静态快照已生成（只读）: {page}")
+            return 0
+        print(f"\n正在用默认浏览器打开静态快照: {page}")
+        print("（这是只读快照，TODO 不可用；需要 TODO 就用不带 --static 的 serve）")
+        return 0 if open_in_browser(page) else 1
+
+    return cmd_serve(argparse.Namespace(
         archive=args.archive,
-        out=out_dir,
-        format="html",
-        since=args.since,
-        until=args.until,
-        browser=args.browser,
-        contains=args.contains,
-        limit=args.limit,
-        html_limit=args.html_limit,
-        snapshot=False,
-    )
-    rc = cmd_export(ns)
-    if rc != 0:
-        return rc
-
-    page = out_dir / "history.html"
-    if not page.exists():
-        print(f"[x] 没有生成 {page}（--format 里需要包含 html）")
-        return 1
-
-    if args.no_open:
-        print(f"\n用浏览器打开这个文件即可查看: {page}")
-        return 0
-
-    print(f"\n正在用默认浏览器打开: {page}")
-    if not open_in_browser(page):
-        print("[!] 自动打开失败，手动双击这个文件即可:")
-        print(f"    {page}")
-        return 1
-    print("在页面里可以搜索关键词（点 .* 切成正则表达式）、按浏览器筛选；")
-    print("「时间」下拉里有今天/昨天/最近 7 天等快捷范围，也可以选「指定某一天」或「自定义范围」；")
-    print("生效的条件会显示成标签，点 × 单独去掉。")
-    return 0
+        port=getattr(args, "port", 0),
+        no_open=args.no_open,
+        verbose=getattr(args, "verbose", False),
+    ))
 
 
 # --------------------------------------------------------------------------
@@ -2741,6 +3345,430 @@ def cmd_purge(args) -> int:
         pass
     print(f"[OK] 清理完成。归档现在剩 {human(left_v)} 条访问 / {human(left_u)} 个 URL。")
     conn.close()
+    return 0
+
+
+# --------------------------------------------------------------------------
+# TODO 存储（服务端）
+# --------------------------------------------------------------------------
+
+def todo_list(conn: sqlite3.Connection) -> list[dict]:
+    """未完成在前，同组内按创建时间倒序。"""
+    rows = conn.execute(
+        "SELECT id, kind, text, url, title, tag, done, created, done_at FROM todos"
+        " ORDER BY done ASC, created DESC"
+    ).fetchall()
+    return [
+        {
+            "id": r[0], "kind": r[1], "text": r[2], "url": r[3], "title": r[4],
+            "tag": r[5], "done": bool(r[6]), "created": r[7], "doneAt": r[8],
+        }
+        for r in rows
+    ]
+
+
+def todo_add(conn: sqlite3.Connection, item: dict) -> tuple[bool, str]:
+    kind = "url" if item.get("kind") == "url" else "text"
+    text = str(item.get("text") or "").strip()
+    url = str(item.get("url") or "").strip()
+    if kind == "url":
+        if not url:
+            return False, "url 为空"
+        # 同一条链接已有未完成的记录就不重复添加
+        dup = conn.execute(
+            "SELECT 1 FROM todos WHERE kind='url' AND url=? AND done=0", (url,)
+        ).fetchone()
+        if dup:
+            return False, "dup"
+    elif not text:
+        return False, "empty"
+
+    todo_id = str(item.get("id") or "").strip() or (
+        "t" + format(int(time.time() * 1000), "x") + "-" + secrets.token_hex(3))
+    conn.execute(
+        "INSERT INTO todos(id, kind, text, url, title, tag, done, created, done_at)"
+        " VALUES(?,?,?,?,?,?,0,?,NULL)",
+        (todo_id, kind, text, url, str(item.get("title") or ""),
+         str(item.get("tag") or "").strip(), now_iso()),
+    )
+    return True, ""
+
+
+def todo_toggle(conn: sqlite3.Connection, todo_id: str) -> bool:
+    row = conn.execute("SELECT done FROM todos WHERE id=?", (todo_id,)).fetchone()
+    if row is None:
+        return False
+    if row[0]:
+        conn.execute("UPDATE todos SET done=0, done_at=NULL WHERE id=?", (todo_id,))
+    else:
+        conn.execute("UPDATE todos SET done=1, done_at=? WHERE id=?", (now_iso(), todo_id))
+    return True
+
+
+def todo_update(conn: sqlite3.Connection, todo_id: str, patch: dict) -> bool:
+    fields, params = [], []
+    if "text" in patch:
+        fields.append("text=?"); params.append(str(patch["text"]).strip())
+    if "tag" in patch:
+        fields.append("tag=?"); params.append(str(patch["tag"]).strip())
+    if not fields:
+        return False
+    params.append(todo_id)
+    cur = conn.execute(f"UPDATE todos SET {', '.join(fields)} WHERE id=?", params)
+    return cur.rowcount > 0
+
+
+def todo_remove(conn: sqlite3.Connection, todo_id: str) -> bool:
+    return conn.execute("DELETE FROM todos WHERE id=?", (todo_id,)).rowcount > 0
+
+
+def todo_clear_done(conn: sqlite3.Connection) -> int:
+    return conn.execute("DELETE FROM todos WHERE done=1").rowcount
+
+
+def todo_import(conn: sqlite3.Connection, items: list) -> dict:
+    """合并导入：按 id 去重，已存在的 id 保留库里的版本（本地可能刚改过）。"""
+    added = skipped = 0
+    for it in items or []:
+        if not isinstance(it, dict):
+            skipped += 1
+            continue
+        kind = "url" if it.get("kind") == "url" else "text"
+        text = str(it.get("text") or "").strip()
+        url = str(it.get("url") or "").strip()
+        if (kind == "url" and not url) or (kind == "text" and not text):
+            skipped += 1
+            continue
+        todo_id = str(it.get("id") or "").strip()
+        if todo_id and conn.execute("SELECT 1 FROM todos WHERE id=?", (todo_id,)).fetchone():
+            continue
+        if not todo_id:
+            todo_id = "t" + format(int(time.time() * 1000), "x") + "-" + secrets.token_hex(3)
+        conn.execute(
+            "INSERT OR IGNORE INTO todos(id, kind, text, url, title, tag, done, created, done_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (todo_id, kind, text, url, str(it.get("title") or ""),
+             str(it.get("tag") or "").strip(), 1 if it.get("done") else 0,
+             str(it.get("created") or now_iso()), it.get("doneAt")),
+        )
+        added += 1
+    return {"added": added, "skipped": skipped}
+
+
+# --------------------------------------------------------------------------
+# 命令: exclude —— 管理额外的排除关键字
+# --------------------------------------------------------------------------
+
+def cmd_exclude(args) -> int:
+    archive_dir: Path = args.archive
+    existing = load_exclude_patterns(archive_dir)
+    words = list(getattr(args, "words", None) or [])
+
+    if args.remove_all:
+        save_exclude_patterns(archive_dir, [])
+        print("[OK] 已清空 exclude.txt")
+        words = []
+
+    if not words:
+        print(f"排除配置: {exclude_file(archive_dir)}")
+        if not existing:
+            print("  （没有额外关键字；归档目录下的链接本来就默认排除）")
+        else:
+            for p in existing:
+                print(f"  {p}")
+        print()
+        print("加一条:   python history_archive.py exclude bili-history.html")
+        print("删一条:   python history_archive.py exclude --remove bili-history.html")
+        return 0
+
+    if args.remove:
+        removed = [w for w in words if w.lower() in [p.lower() for p in existing]]
+        kept = [p for p in existing if p.lower() not in [w.lower() for w in words]]
+        save_exclude_patterns(archive_dir, kept)
+        for w in removed:
+            print(f"[OK] 已移除: {w}")
+        missing = [w for w in words if w.lower() not in [p.lower() for p in existing]]
+        for w in missing:
+            print(f"[!] 本来就没有: {w}")
+        return 0
+
+    merged = list(existing)
+    for w in words:
+        if w.lower() in [p.lower() for p in merged]:
+            print(f"[!] 已经在里面了: {w}")
+        else:
+            merged.append(w)
+            print(f"[OK] 已添加: {w}")
+    path = save_exclude_patterns(archive_dir, merged)
+    print(f"\n配置写在 {path}，下次 sync（包括计划任务）会自动生效。")
+    print("已经归档进去的记录用 purge 清掉：")
+    print("  python history_archive.py purge        # 先预演")
+    print("  python history_archive.py purge --yes  # 真删（会先自动备份）")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# 命令: serve —— 本地 HTTP 服务
+# --------------------------------------------------------------------------
+
+def rows_payload(conn: sqlite3.Connection, limit: int | None = None) -> list:
+    """导出给前端的记录数组，列顺序与静态导出的 DATA 完全一致。"""
+    sql = EXPORT_SQL + " ORDER BY v.visit_time_raw DESC"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    return [list(r) for r in conn.execute(sql)]
+
+
+def build_handler(archive_dir: Path, token: str, state: dict):
+    """生成请求处理器。state 里放共享的连接和锁（服务是常驻的，不每次重开库）。"""
+    lock: threading.Lock = state["lock"]
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "web-history-archive"
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):    # 默认会往 stderr 刷一堆，压掉
+            if state.get("verbose"):
+                sys.stderr.write("  %s\n" % (fmt % args))
+
+        def _send(self, code: int, body: bytes, ctype: str, extra=None):
+            if len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+                body = gzip.compress(body, 6)
+                gz = True
+            else:
+                gz = False
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")     # 禁止被别的页面内嵌
+            self.send_header("Referrer-Policy", "no-referrer")
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _json(self, obj, code=200):
+            self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+
+        def _err(self, code, msg):
+            self._json({"ok": False, "error": msg}, code)
+
+        def _check_token(self):
+            """令牌每次启动随机生成、写在打开的 URL 里。
+            别的网页猜不到它，所以拿不到令牌就等于这个服务不存在。"""
+            q = parse_qs(urlsplit(self.path).query)
+            got = self.headers.get("X-Token") or (q.get("t") or [""])[0]
+            if not got:            # 也接受 Cookie，刷新页面时不用一直带着 ?t=
+                for part in (self.headers.get("Cookie") or "").split(";"):
+                    k, _, v = part.strip().partition("=")
+                    if k == "wh_token":
+                        got = v
+                        break
+            if not got or not hmac.compare_digest(str(got), token):
+                self._err(403, "缺少或错误的访问令牌，请用 serve 命令打印的地址打开。")
+                return False
+            return True
+
+        def _check_origin(self):
+            """跨站页面即使猜到端口也发不出请求：浏览器会带 Origin，对不上就拒。"""
+            origin = self.headers.get("Origin")
+            if not origin:
+                return True
+            host = self.headers.get("Host") or ""
+            return origin in (f"http://{host}", f"https://{host}")
+
+        def do_GET(self):
+            path = urlsplit(self.path).path
+            if path == "/favicon.ico":
+                self._send(204, b"", "image/x-icon")
+                return
+            if not self._check_token():
+                return
+            if path in (VIEWER_PATH, VIEWER_PATH.rstrip("/"), "/index.html"):
+                page = render_viewer_html(archive_dir, mode="server")
+                self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
+                           {"Set-Cookie": f"wh_token={token}; Path=/; SameSite=Strict"})
+            elif path == "/":
+                # 只把页面放在固定的 /history/ 下：这样归档时能靠路径认出
+                # 「这是工具自己的页面」，端口和令牌每次都在变，认不得。
+                self._send(302, b"", "text/plain; charset=utf-8",
+                           {"Location": VIEWER_PATH + "?" + (urlsplit(self.path).query or "")})
+            elif path == "/api/rows":
+                with lock:
+                    data = rows_payload(state["conn"])
+                self._json({"ok": True, "rows": data})
+            elif path == "/api/meta":
+                with lock:
+                    conn = state["conn"]
+                    meta = {
+                        "rows": conn.execute(
+                            "SELECT COALESCE(SUM(dup_count),0) FROM visits").fetchone()[0],
+                        "urls": conn.execute("SELECT COUNT(*) FROM urls").fetchone()[0],
+                        "titles": conn.execute("SELECT COUNT(*) FROM titles").fetchone()[0],
+                        "sources": conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
+                        "generated": now_iso(),
+                    }
+                    span = conn.execute("SELECT MIN(day), MAX(day) FROM visits").fetchone()
+                    meta["first_day"], meta["last_day"] = span[0], span[1]
+                    run = conn.execute(
+                        "SELECT finished_utc, new_visits FROM sync_runs"
+                        " WHERE finished_utc IS NOT NULL ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                    if run:
+                        meta["last_sync"], meta["last_sync_new"] = run[0], run[1]
+                self._json({"ok": True, "meta": meta})
+            elif path == "/api/todos":
+                with lock:
+                    self._json({"ok": True, "todos": todo_list(state["conn"])})
+            else:
+                self._err(404, "没有这个地址")
+
+        def do_POST(self):
+            path = urlsplit(self.path).path
+            if not self._check_token():
+                return
+            if not self._check_origin():
+                self._err(403, "跨站请求被拒绝")
+                return
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+            if ctype != "application/json":
+                # 强制 JSON 也挡掉一批简单的跨站表单提交
+                self._err(415, "只接受 application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 8 * 1024 * 1024:
+                    self._err(413, "请求体过大")
+                    return
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError) as exc:
+                self._err(400, f"请求体不是合法 JSON: {exc}")
+                return
+
+            if path == "/api/todos":
+                action = payload.get("action")
+                with lock:
+                    conn = state["conn"]
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        msg = ""
+                        if action == "add":
+                            changed, why = todo_add(conn, payload.get("item") or {})
+                            msg = {"dup": "这条链接已经在未完成的 TODO 里了",
+                                   "empty": "内容不能为空"}.get(why, why)
+                        elif action == "toggle":
+                            changed = todo_toggle(conn, payload.get("id") or "")
+                        elif action == "update":
+                            changed = todo_update(conn, payload.get("id") or "",
+                                                  payload.get("patch") or {})
+                        elif action == "remove":
+                            changed = todo_remove(conn, payload.get("id") or "")
+                        elif action == "clear_done":
+                            changed = True
+                            msg = f"已清除 {todo_clear_done(conn)} 条"
+                        elif action == "import":
+                            res = todo_import(conn, payload.get("items") or [])
+                            changed = True
+                            msg = (f"新增 {res['added']} 条"
+                                   + (f"，跳过 {res['skipped']} 条" if res["skipped"] else ""))
+                        else:
+                            conn.execute("ROLLBACK")
+                            self._err(400, f"不认识的操作: {action}")
+                            return
+                        conn.execute("COMMIT")
+                    except sqlite3.Error as exc:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                        self._err(500, f"写库失败: {exc}")
+                        return
+                    self._json({"ok": True, "changed": bool(changed), "message": msg,
+                                "todos": todo_list(conn)})
+            elif path == "/api/sync":
+                try:
+                    new = run_sync_once(archive_dir, state)
+                except Exception as exc:  # noqa: BLE001
+                    self._err(500, f"同步失败: {exc}")
+                    return
+                with lock:
+                    rows = rows_payload(state["conn"])
+                self._json({"ok": True, "new_visits": new, "rows": rows})
+            else:
+                self._err(404, "没有这个地址")
+
+        do_HEAD = do_GET
+
+    return Handler
+
+
+def run_sync_once(archive_dir: Path, state: dict) -> int:
+    """在服务进程里跑一次 sync，返回本次新增条数。"""
+    args = argparse.Namespace(
+        archive=archive_dir, verbose=False, source="all", extra_root=None,
+        exclude=None, no_self_exclude=False,
+    )
+    lock: threading.Lock = state["lock"]
+    with lock:
+        # sync 会自己开库写，先把服务这边的连接让开，跑完再重开
+        state["conn"].close()
+        try:
+            cmd_sync(args)
+        finally:
+            state["conn"] = open_archive(archive_dir, threaded=True)
+        row = state["conn"].execute(
+            "SELECT new_visits FROM sync_runs WHERE finished_utc IS NOT NULL"
+            " ORDER BY id DESC LIMIT 1").fetchone()
+    return int(row[0]) if row else 0
+
+
+def cmd_serve(args) -> int:
+    archive_dir: Path = args.archive
+    conn = open_archive(archive_dir, create=False, threaded=True)
+    token = secrets.token_urlsafe(18)
+    state = {"conn": conn, "lock": threading.Lock(), "verbose": args.verbose}
+
+    handler = build_handler(archive_dir, token, state)
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", int(args.port)), handler)
+    except OSError as exc:
+        print(f"[x] 端口 {args.port} 起不来: {exc}")
+        conn.close()
+        return 1
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    url = f"http://127.0.0.1:{port}{VIEWER_PATH}?t={token}"
+
+    # 注意 flush：输出被重定向到管道/文件时，print 默认是块缓冲，
+    # 用户会看着一片空白等不到那行地址。
+    print("=" * 62, flush=True)
+    print("  浏览历史归档 · 本地服务已启动", flush=True)
+    print("=" * 62, flush=True)
+    print(f"  地址   : {url}", flush=True)
+    print(f"  归档库 : {archive_dir / 'archive.sqlite'}", flush=True)
+    print(f"  监听   : 127.0.0.1:{port}（只有本机能访问，局域网和外网都到不了）", flush=True)
+    print(f"  令牌   : 已写在地址里，每次启动都不一样", flush=True)
+    print(flush=True)
+    print("  按 Ctrl+C 停止", flush=True)
+    print(flush=True)
+
+    if not args.no_open:
+        open_in_browser(url)
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n正在停止…")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        conn.close()
     return 0
 
 
@@ -2842,15 +3870,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_export.add_argument("--html-limit", type=int, default=None, help="HTML 内嵌条数上限（默认 100000）")
     p_export.add_argument("--snapshot", action="store_true", help="同时保存一份带时间戳的快照")
 
-    p_view = sub.add_parser("view", parents=[common], help="生成网页版历史记录并用浏览器打开")
-    p_view.add_argument("--out", type=Path, default=None, help="导出目录（默认 <归档>/exports）")
-    p_view.add_argument("--since", default=None, help="只看该日期之后的记录 YYYY-MM-DD")
-    p_view.add_argument("--until", default=None, help="只看该日期之前的记录 YYYY-MM-DD")
-    p_view.add_argument("--browser", default=None, help="只看指定浏览器，逗号分隔")
-    p_view.add_argument("--contains", default=None, help="只看 URL/标题包含该文本的记录")
-    p_view.add_argument("--limit", type=int, default=None, help="最多放进去多少条")
-    p_view.add_argument("--html-limit", type=int, default=None, help="内嵌条数上限（默认 100000）")
-    p_view.add_argument("--no-open", action="store_true", help="只生成文件，不自动打开浏览器")
+    p_view = sub.add_parser("view", parents=[common], help="启动本地服务并打开（默认）")
+    p_view.add_argument("--out", type=Path, default=None, help="静态模式的导出目录")
+    p_view.add_argument("--since", default=None, help="静态模式：起始日期 YYYY-MM-DD")
+    p_view.add_argument("--until", default=None, help="静态模式：结束日期 YYYY-MM-DD")
+    p_view.add_argument("--browser", default=None, help="静态模式：只导出指定浏览器")
+    p_view.add_argument("--contains", default=None, help="静态模式：只导出含该文本的记录")
+    p_view.add_argument("--limit", type=int, default=None, help="静态模式：最多多少条")
+    p_view.add_argument("--html-limit", type=int, default=None, help="静态模式：内嵌条数上限")
+    p_view.add_argument("--static", action="store_true",
+                        help="不起服务，生成自包含的只读快照文件")
+    p_view.add_argument("--port", type=int, default=0, help="服务端口（默认自动挑一个空闲的）")
+    p_view.add_argument("-v", "--verbose", action="store_true", help="打印每个请求")
+    p_view.add_argument("--no-open", action="store_true", help="只启动，不自动打开浏览器")
+
+    p_serve = sub.add_parser("serve", parents=[common], help="启动本地服务（不自动打开浏览器）")
+    p_serve.add_argument("--port", type=int, default=0, help="服务端口（默认自动挑一个空闲的）")
+    p_serve.add_argument("-v", "--verbose", action="store_true", help="打印每个请求")
+    p_serve.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
 
     p_backup = sub.add_parser("backup", parents=[common], help="备份归档数据库")
     p_backup.add_argument("--keep", type=int, default=30, help="保留最近多少份备份（默认 30，0=不清理）")
@@ -2862,7 +3899,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_purge.add_argument("--exclude", action="append", help="额外排除包含该关键字的链接（可重复）")
     p_purge.add_argument("--no-self-exclude", action="store_true", help="不把归档目录算作自我引用")
 
-    commands = {"sync", "detect", "stats", "verify", "export", "view", "backup", "purge"}
+    p_excl = sub.add_parser("exclude", parents=[common],
+                            help="管理额外排除的链接关键字（持久生效，计划任务也会用）")
+    p_excl.add_argument("words", nargs="*", help="要添加（或配合 --remove 删除）的关键字")
+    p_excl.add_argument("--remove", action="store_true", help="删除这些关键字而不是添加")
+    p_excl.add_argument("--clear", dest="remove_all", action="store_true", help="清空全部关键字")
+
+    commands = {"sync", "detect", "stats", "verify", "export", "view", "serve",
+                "backup", "purge", "exclude"}
     if not argv:
         argv = ["sync"]
     elif argv[0] in ("-h", "--help"):
@@ -2901,10 +3945,14 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_export(args)
         if args.command == "view":
             return cmd_view(args)
+        if args.command == "serve":
+            return cmd_serve(args)
         if args.command == "backup":
             return cmd_backup(args)
         if args.command == "purge":
             return cmd_purge(args)
+        if args.command == "exclude":
+            return cmd_exclude(args)
     except KeyboardInterrupt:
         print("\n已中断")
         return 130
