@@ -105,6 +105,31 @@ powershell -ExecutionPolicy Bypass -File install-task.ps1 -Uninstall   # 删除�
 > **建议**：归档库是**单个文件** `<脚本目录>\archive\archive.sqlite`，
 > 记得把它纳入你平时的备份（网盘 / 移动硬盘）。本工具保证不丢记录，但保证不了硬盘不坏。
 
+### 自我引用会被自动排除
+
+用 `view` 打开那张 `history.html` 时，**浏览器也会把这次打开记进历史**。
+下次 `sync` 就又把它归档回来——一条没有任何信息量的记录，还会越滚越多。
+
+所以默认会排除 `file:` 协议且路径落在归档目录下的链接。sync 结束时会告诉你了排除几条：
+
+```
+已排除 49 条自身产生的记录（归档页面被自己打开产生的访问）
+```
+
+如果归档目录之外还有同类页面（比如别的工具生成的导出页），用 `--exclude` 追加关键字：
+
+```powershell
+python history_archive.py sync --exclude bili-history.html
+```
+
+已经归档进去的存量记录，用 `purge` 清掉——**默认只预演**，确认后才加 `--yes`，
+而且删除前会自动备份一份：
+
+```powershell
+python history_archive.py purge          # 列出会删什么，什么都不动
+python history_archive.py purge --yes    # 真正执行（先自动备份）
+```
+
 ---
 
 ## 命令一览
@@ -117,6 +142,7 @@ python history_archive.py stats             归档统计（按浏览器/年份/�
 python history_archive.py verify            校验归档库完整性
 python history_archive.py export [选项]     导出 CSV / JSONL / HTML
 python history_archive.py backup            一致性备份（可滚动保留 N 份）
+python history_archive.py purge             清除归档里工具自身产生的记录（默认只预演）
 
 全局选项:
   --archive DIR        归档目录，默认 <脚本目录>/archive
@@ -127,6 +153,13 @@ sync 选项:
   -v, --verbose        打印详细日志
   --source chrome,edge 只归档指定浏览器
   --extra-root DIR     追加自定义的用户数据目录（浏览器装在非默认位置时用）
+  --exclude 关键字     额外排除包含该关键字的链接（可重复）
+  --no-self-exclude    不排除归档目录下的链接（默认会排除，见下）
+
+purge 选项:
+  --yes                真正执行删除（默认只预演，什么都不删）
+  --no-backup          删除前不备份（不建议）
+  --exclude / --no-self-exclude   含义同 sync
 
 view 选项:
   --since / --until YYYY-MM-DD   只放进这个时间范围的记录
@@ -311,9 +344,10 @@ WHERE u.url LIKE '%github.com/yourname%';
 改动代码后跑这两个脚本，别把已经修好的坑再踩回去：
 
 ```powershell
+python test_filters.py    # 链接过滤（自我引用判定、路径归一化，26 项断言）
 python test_firefox.py    # Firefox 归档路径（合成 places.sqlite，26 项断言）
 python history_archive.py view --no-open
-node test_viewer.js       # 网页版筛选与正则逻辑（82 项断言，需先跑上一行）
+node test_viewer.js       # 网页版筛选与正则逻辑（221 项断言，需先跑上一行）
 ```
 
 `test_viewer.js` 从生成的 HTML 里抽出标记为 `__FILTER_LOGIC_START__` /
@@ -332,6 +366,7 @@ node test_viewer.js       # 网页版筛选与正则逻辑（82 项断言，需�
 | --- | --- |
 | `history_archive.py` | 主程序，全部功能都在这里 |
 | `install-task.ps1` | 注册 / 卸载 Windows 计划任务 |
+| `test_filters.py` | 链接过滤测试（`python test_filters.py`） |
 | `test_firefox.py` | Firefox 归档路径的测试（`python test_firefox.py`） |
 | `test_viewer.js` | 网页版筛选与正则逻辑的测试（`node test_viewer.js`） |
 | `LICENSE` | MIT |

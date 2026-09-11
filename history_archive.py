@@ -45,7 +45,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 # --------------------------------------------------------------------------
 # 常量
@@ -349,6 +349,55 @@ def split_url(url: str) -> tuple[str, str]:
         return scheme, host
     except ValueError:
         return "", ""
+
+
+def file_url_to_path(url: str) -> str:
+    """file:// 链接还原成本地路径（统一小写、反斜杠、去掉百分号转义）"""
+    if not url or not url.lower().startswith("file:"):
+        return ""
+    try:
+        raw = urlsplit(url).path
+    except ValueError:
+        return ""
+    path = unquote(raw)
+    # Windows 上 file:///E:/x 的 path 是 /E:/x，去掉开头的斜杠
+    if len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return path.replace("/", "\\").lower().rstrip("\\")
+
+
+def is_self_url(url: str, archive_dir: Path) -> bool:
+    """判断这条记录是不是归档工具自己产生的。
+
+    最典型的就是用 view 打开的那张 history.html——它一被打开就进了浏览器历史，
+    下次 sync 又把它归档进来，越滚越多，而且没有任何信息量。
+    """
+    path = file_url_to_path(url)
+    if not path:
+        return False
+    base = str(archive_dir).replace("/", "\\").lower().rstrip("\\")
+    return path == base or path.startswith(base + "\\")
+
+
+def make_url_filter(archive_dir: Path, extra_patterns: list[str] | None = None,
+                    exclude_self: bool = True):
+    """返回 keep_url(url) —— True 表示这条记录要归档。
+
+    默认排除归档目录下的一切（自己的导出页面），另外可以用 --exclude 追加关键字。
+    """
+    patterns = [p.lower() for p in (extra_patterns or []) if p]
+
+    def keep_url(url: str) -> bool:
+        if exclude_self and is_self_url(url, archive_dir):
+            return False
+        if patterns:
+            low = url.lower()
+            for pat in patterns:
+                if pat in low:
+                    return False
+        return True
+
+    return keep_url
 
 
 def source_key(browser: str, profile: str, path: Path) -> str:
@@ -665,6 +714,7 @@ def ingest_chromium(
     url_id_map: dict[str, int],
     log: Logger,
     stats: dict,
+    keep_url=None,
 ) -> None:
     src = sqlite3.connect(str(db_path))
     try:
@@ -682,11 +732,15 @@ def ingest_chromium(
         # ---- 1) URL 元数据 ----
         url_rows = []
         url_titles: list[tuple[str, str]] = []
+        excluded_ids: set[int] = set()
         select_urls = (
             f"SELECT u.id, u.url, {title_expr}, {typed_expr} FROM urls u WHERE u.url IS NOT NULL"
         )
         for _raw_id, url, title, typed_count in src.execute(select_urls):
             if not url:
+                continue
+            if keep_url is not None and not keep_url(url):
+                excluded_ids.add(_raw_id)
                 continue
             scheme, host = split_url(url)
             url_rows.append(
@@ -705,6 +759,8 @@ def ingest_chromium(
                 url_titles.append((url, title))
         register_urls(conn, url_id_map, url_rows, log, stats)
         record_titles(conn, url_id_map, url_titles, stats)
+        if excluded_ids:
+            log(f"  排除 {human(len(excluded_ids))} 个链接（工具自身产生的页面）", level="debug")
         log(f"  读取 {human(len(url_rows))} 个 URL", level="debug")
 
         # ---- 2) 访问记录 ----
@@ -746,6 +802,9 @@ def ingest_chromium(
 
         for raw_url_id, raw_time, transition, duration in src.execute(select_visits):
             considered += 1
+            if raw_url_id in excluded_ids:
+                stats["skipped_self"] = stats.get("skipped_self", 0) + 1
+                continue
             uid = local_map.get(raw_url_id)
             if uid is None:
                 skipped += 1
@@ -793,6 +852,7 @@ def ingest_firefox(
     url_id_map: dict[str, int],
     log: Logger,
     stats: dict,
+    keep_url=None,
 ) -> None:
     src = sqlite3.connect(str(db_path))
     try:
@@ -806,12 +866,16 @@ def ingest_firefox(
 
         url_rows = []
         url_titles: list[tuple[str, str]] = []
+        excluded_ids: set[int] = set()
         select_places = (
             f"SELECT p.id, p.url, {title_expr}, {typed_expr} FROM moz_places p "
             "WHERE p.url IS NOT NULL"
         )
         for _raw_id, url, title, typed in src.execute(select_places):
             if not url:
+                continue
+            if keep_url is not None and not keep_url(url):
+                excluded_ids.add(_raw_id)
                 continue
             scheme, host = split_url(url)
             url_rows.append(
@@ -861,6 +925,9 @@ def ingest_firefox(
             f"SELECT {place_ref}, v.visit_date, {type_expr} FROM moz_historyvisits v"
         ):
             considered += 1
+            if raw_place_id in excluded_ids:
+                stats["skipped_self"] = stats.get("skipped_self", 0) + 1
+                continue
             uid = local_map.get(raw_place_id)
             if uid is None:
                 skipped += 1
@@ -937,9 +1004,12 @@ def cmd_sync(args) -> int:
         "INSERT INTO sync_runs(started_utc,status) VALUES(?,'running')", (started,)
     ).lastrowid
 
-    stats = {"new_visits": 0, "new_urls": 0, "new_titles": 0, "dup_merged": 0}
+    stats = {"new_visits": 0, "new_urls": 0, "new_titles": 0, "dup_merged": 0,
+             "skipped_self": 0}
     ok = fail = 0
     stage_root = archive_dir / "_staging"
+    keep_url = make_url_filter(archive_dir, getattr(args, "exclude", None),
+                               not getattr(args, "no_self_exclude", False))
 
     def source_snapshot(source_id: int) -> tuple[int, int]:
         row = conn.execute(
@@ -965,9 +1035,9 @@ def cmd_sync(args) -> int:
                 rows_before, visits_before = source_snapshot(source_id)
                 staged = stage_sqlite(src["path"], stage_dir, log)
                 if src["kind"] == "chromium":
-                    ingest_chromium(conn, staged, source_id, url_id_map, log, stats)
+                    ingest_chromium(conn, staged, source_id, url_id_map, log, stats, keep_url)
                 else:
-                    ingest_firefox(conn, staged, source_id, url_id_map, log, stats)
+                    ingest_firefox(conn, staged, source_id, url_id_map, log, stats, keep_url)
 
                 rows_after, visits_after = source_snapshot(source_id)
                 new_rows = rows_after - rows_before
@@ -1039,6 +1109,9 @@ def cmd_sync(args) -> int:
             f"归档总计: 访问 {human(total_v)} 条"
             f"（去重后 {human(total_rows)} 行）/ URL {human(total_u)} 个"
         )
+        if stats["skipped_self"]:
+            log(f"已排除 {human(stats['skipped_self'])} 条自身产生的记录"
+                f"（归档页面被自己打开产生的访问）")
         span = conn.execute(
             "SELECT MIN(visit_time_local), MAX(visit_time_local) FROM visits"
         ).fetchone()
@@ -2589,6 +2662,89 @@ def cmd_view(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# 命令: purge —— 清掉已经归档进去的自我引用记录
+# --------------------------------------------------------------------------
+
+def cmd_purge(args) -> int:
+    archive_dir: Path = args.archive
+    conn = open_archive(archive_dir, create=False)
+    keep_url = make_url_filter(archive_dir, getattr(args, "exclude", None),
+                               not getattr(args, "no_self_exclude", False))
+
+    rows = conn.execute(
+        """
+        SELECT u.id, u.url, COUNT(v.id), COALESCE(SUM(v.dup_count),0),
+               MIN(v.visit_time_local), MAX(v.visit_time_local)
+        FROM urls u LEFT JOIN visits v ON v.url_id = u.id
+        GROUP BY u.id
+        """
+    ).fetchall()
+    targets = [r for r in rows if not keep_url(r[1])]
+
+    if not targets:
+        print("归档库里没有需要清理的自我引用记录。")
+        conn.close()
+        return 0
+
+    print("以下记录会被清除（它们都是工具自己产生的，没有信息量）：\n")
+    total_visits = 0
+    for _uid, url, n, dup, first, last in targets:
+        total_visits += dup
+        print(f"  {human(dup):>8} 次访问 · {human(n):>6} 行")
+        print(f"           {url}")
+        print(f"           {first} ~ {last}")
+
+    print(f"\n共 {len(targets)} 个 URL、{human(total_visits)} 条访问记录。")
+
+    if not args.yes:
+        print("\n这是预演，什么都没有删除。确认无误后加 --yes 真正执行。")
+        print("（执行前会自动备份一份归档库）")
+        conn.close()
+        return 0
+
+    # 先备份：这是对「只增不减」的归档做删除，必须留退路
+    if not args.no_backup:
+        src_path = archive_dir / "archive.sqlite"
+        bk_dir = archive_dir / "backups"
+        bk_dir.mkdir(parents=True, exist_ok=True)
+        dst = bk_dir / f"archive-before-purge-{datetime.now():%Y%m%d-%H%M%S}.sqlite"
+        raw = sqlite3.connect(str(src_path))
+        out = sqlite3.connect(str(dst))
+        try:
+            raw.backup(out)
+        finally:
+            out.close()
+            raw.close()
+        print(f"\n[OK] 已备份 -> {dst}")
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for uid, _url, _n, _dup, _f, _l in targets:
+            conn.execute("DELETE FROM visits WHERE url_id=?", (uid,))
+            conn.execute("DELETE FROM titles WHERE url_id=?", (uid,))
+            conn.execute("DELETE FROM urls WHERE id=?", (uid,))
+        conn.execute("COMMIT")
+    except sqlite3.Error as exc:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        print(f"[x] 删除失败，已回滚: {exc}")
+        conn.close()
+        return 1
+
+    left_v = conn.execute("SELECT COALESCE(SUM(dup_count),0) FROM visits").fetchone()[0]
+    left_u = conn.execute("SELECT COUNT(*) FROM urls").fetchone()[0]
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        pass
+    print(f"[OK] 清理完成。归档现在剩 {human(left_v)} 条访问 / {human(left_u)} 个 URL。")
+    conn.close()
+    return 0
+
+
+# --------------------------------------------------------------------------
 # 命令: backup
 # --------------------------------------------------------------------------
 
@@ -2663,6 +2819,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_sync.add_argument("-v", "--verbose", action="store_true", help="输出详细日志")
     p_sync.add_argument("--source", default="all", help="只归档指定浏览器，逗号分隔，如 chrome,edge")
     p_sync.add_argument("--extra-root", action="append", help="额外的用户数据目录（可重复）")
+    p_sync.add_argument("--exclude", action="append",
+                        help="额外排除包含该关键字的链接（可重复），如 --exclude bili-history.html")
+    p_sync.add_argument("--no-self-exclude", action="store_true",
+                        help="不排除归档目录下的链接（默认会排除，避免把自己的页面收进来）")
 
     p_detect = sub.add_parser("detect", parents=[common], help="列出探测到的浏览器历史库")
     p_detect.add_argument("--extra-root", action="append", help="额外的用户数据目录（可重复）")
@@ -2696,7 +2856,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_backup.add_argument("--keep", type=int, default=30, help="保留最近多少份备份（默认 30，0=不清理）")
     p_backup.add_argument("--backup-dir", type=Path, default=None, help="备份目录")
 
-    commands = {"sync", "detect", "stats", "verify", "export", "view", "backup"}
+    p_purge = sub.add_parser("purge", parents=[common], help="清除归档里工具自身产生的记录")
+    p_purge.add_argument("--yes", action="store_true", help="真正执行删除（默认只预演）")
+    p_purge.add_argument("--no-backup", action="store_true", help="删除前不备份（不建议）")
+    p_purge.add_argument("--exclude", action="append", help="额外排除包含该关键字的链接（可重复）")
+    p_purge.add_argument("--no-self-exclude", action="store_true", help="不把归档目录算作自我引用")
+
+    commands = {"sync", "detect", "stats", "verify", "export", "view", "backup", "purge"}
     if not argv:
         argv = ["sync"]
     elif argv[0] in ("-h", "--help"):
@@ -2737,6 +2903,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_view(args)
         if args.command == "backup":
             return cmd_backup(args)
+        if args.command == "purge":
+            return cmd_purge(args)
     except KeyboardInterrupt:
         print("\n已中断")
         return 130
