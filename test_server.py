@@ -192,7 +192,7 @@ def main() -> int:
             "kind": "url", "url": "https://www.bilibili.com/video/BV1"}})
         eq(body["changed"], False, "同一条 URL 未完成时不再重复添加")
         eq(len(body["todos"]), 2, "列表没变")
-        check("已" in body.get("message", "") or "在" in body.get("message", ""),
+        check("already" in (body.get("message") or "").lower(),
               "重复时给出了提示文字", body.get("message"))
 
         st, body = c.post("/api/todos", {"action": "add", "item": {"kind": "text", "text": " "}})
@@ -222,7 +222,7 @@ def main() -> int:
             {"kind": "text", "text": ""},
         ]})
         eq(len(body["todos"]), 3, "导入只加了新的那条")
-        check("跳过 1" in (body.get("message") or ""), "如实报告跳过了几条",
+        check("skipped 1" in (body.get("message") or ""), "如实报告跳过了几条",
               body.get("message"))
 
         st, body = c.post("/api/todos", {"action": "toggle", "id": "x1"})

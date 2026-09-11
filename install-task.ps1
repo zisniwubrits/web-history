@@ -29,7 +29,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $scriptPy = Join-Path $scriptDir 'history_archive.py'
 
 if (-not (Test-Path $scriptPy)) {
-    throw "找不到 history_archive.py：$scriptPy"
+    throw "history_archive.py not found: $scriptPy"
 }
 
 # ---------- 卸载 ----------
@@ -37,9 +37,9 @@ if ($Uninstall) {
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($existing) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Host "[OK] 已删除计划任务: $TaskName" -ForegroundColor Green
+        Write-Host "[OK] Scheduled task removed: $TaskName" -ForegroundColor Green
     } else {
-        Write-Host "计划任务不存在: $TaskName"
+        Write-Host "Scheduled task not found: $TaskName"
     }
     return
 }
@@ -60,17 +60,17 @@ if (-not $pythonw) {
     if ($py) { $pythonw = $py.Source }
 }
 if (-not $pythonw) {
-    throw "没有找到 python，请先安装 Python 3.8+ 并加入 PATH。"
+    throw "Python not found. Install Python 3.8+ and make sure it is on PATH."
 }
-Write-Host "Python      : $pythonw"
+Write-Host "Python  : $pythonw"
 
 # ---------- 组织参数 ----------
 $argument = '"' + $scriptPy + '" sync'
 if ($Archive -ne '') {
     $argument += ' --archive "' + $Archive + '"'
-    Write-Host "归档目录    : $Archive"
+    Write-Host "Archive : $Archive"
 } else {
-    Write-Host "归档目录    : $scriptDir\archive （默认）"
+    Write-Host "Archive : $scriptDir\archive (default)"
 }
 
 $action = New-ScheduledTaskAction -Execute $pythonw -Argument $argument -WorkingDirectory $scriptDir
@@ -92,25 +92,25 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 10)
 
 Register-ScheduledTask -TaskName $TaskName `
-    -Description '把浏览器历史增量归档到本地 SQLite，永久保存（web-history-archive）' `
+    -Description 'Incrementally archive browser history into a local SQLite database (web-history-archive)' `
     -Action $action -Trigger @($triggerLogon, $triggerRepeat) `
     -Principal $principal -Settings $settings -Force | Out-Null
 
-Write-Host "[OK] 计划任务已注册: $TaskName" -ForegroundColor Green
-Write-Host "     运行时机: 登录后 3 分钟，之后每 $IntervalHours 小时一次"
+Write-Host "[OK] Scheduled task registered: $TaskName" -ForegroundColor Green
+Write-Host "     Schedule: 3 minutes after logon, then every $IntervalHours hour(s)"
 
 $info = Get-ScheduledTask -TaskName $TaskName
-Write-Host "     状态    : $($info.State)"
+Write-Host "     State   : $($info.State)"
 
 if ($RunNow) {
-    Write-Host "     正在立即运行一次 …"
+    Write-Host "     Running once now..."
     Start-ScheduledTask -TaskName $TaskName
     Start-Sleep -Seconds 3
-    Write-Host "     任务状态: $((Get-ScheduledTask -TaskName $TaskName).State)"
+    Write-Host "     State   : $((Get-ScheduledTask -TaskName $TaskName).State)"
 }
 
 Write-Host ''
-Write-Host '常用操作:' -ForegroundColor Cyan
-Write-Host "  立即运行   Start-ScheduledTask -TaskName $TaskName"
-Write-Host "  查看状态   Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo"
-Write-Host "  删除任务   powershell -ExecutionPolicy Bypass -File install-task.ps1 -Uninstall"
+Write-Host 'Common commands:' -ForegroundColor Cyan
+Write-Host "  Run now      Start-ScheduledTask -TaskName $TaskName"
+Write-Host "  Check state  Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo"
+Write-Host "  Remove task  powershell -ExecutionPolicy Bypass -File install-task.ps1 -Uninstall"

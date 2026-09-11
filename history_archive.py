@@ -432,9 +432,9 @@ def save_exclude_patterns(archive_dir: Path, patterns: list[str]) -> Path:
     archive_dir.mkdir(parents=True, exist_ok=True)
     path = exclude_file(archive_dir)
     body = [
-        "# 归档时额外排除的链接关键字，一行一个，包含即排除（不区分大小写）。",
-        "# 用 `python history_archive.py exclude 关键字` 增删，别手改也行。",
-        "# 归档目录下的链接（本工具自己的导出页面）已经默认排除，不用写在这里。",
+        "# Extra URL keywords to exclude while archiving. One per line; a match excludes the URL.",
+        "# Matching is case-insensitive. Edit with `python history_archive.py exclude <keyword>`.",
+        "# Links under the archive directory (this tool's own pages) are already excluded by default.",
         "",
     ]
     body.extend(patterns)
@@ -658,10 +658,10 @@ def stage_sqlite(src: Path, stage_dir: Path, log: Logger) -> Path:
             return dst
         except (PermissionError, OSError) as exc:
             last_err = exc
-            log(f"复制 {src.name} 第 {attempt} 次失败: {exc}", level="debug")
+            log(f"copy of {src.name} failed on attempt {attempt}: {exc}", level="debug")
             time.sleep(0.5 * attempt)
 
-    raise RuntimeError(f"无法复制 {src}（可能被独占锁定）: {last_err}")
+    raise RuntimeError(f"cannot copy {src} (it may be exclusively locked): {last_err}")
 
 
 def cleanup_stage(stage_dir: Path):
@@ -709,7 +709,7 @@ def open_archive(archive_dir: Path, *, create: bool = True,
     archive_dir.mkdir(parents=True, exist_ok=True)
     db_path = archive_dir / "archive.sqlite"
     if not create and not db_path.exists():
-        raise SystemExit(f"归档库还不存在: {db_path}\n请先运行: python history_archive.py sync")
+        raise SystemExit(f"archive database does not exist yet: {db_path}\nrun this first: python history_archive.py sync")
     # 服务模式下 ThreadingHTTPServer 每个请求一个线程，连接必须允许跨线程；
     # 所有访问都在同一把锁里串行化，所以是安全的。
     conn = sqlite3.connect(db_path, isolation_level=None,
@@ -722,8 +722,8 @@ def open_archive(archive_dir: Path, *, create: bool = True,
     if not has_expected_visit_key(conn):
         conn.close()
         raise SystemExit(
-            f"归档库 {db_path} 的表结构来自旧版本，无法直接升级。\n"
-            f"请先备份并删除该文件（或整个 {archive_dir} 目录）后重新运行 sync。"
+            f"the schema of {db_path} comes from an older version and cannot be upgraded in place.\n"
+            f"back up and delete that file (or the whole {archive_dir} directory), then run sync again."
         )
     conn.execute(
         "INSERT INTO meta(key,value) VALUES('schema_version','2') "
@@ -822,12 +822,12 @@ def ingest_chromium(
     src = sqlite3.connect(str(db_path))
     try:
         if not table_exists(src, "urls") or not table_exists(src, "visits"):
-            raise RuntimeError("不是有效的 Chromium 历史库（缺少 urls/visits 表）")
+            raise RuntimeError("not a valid Chromium history database (urls/visits tables are missing)")
 
         ucols = table_columns(src, "urls")
         vcols = table_columns(src, "visits")
         if "url" not in ucols or "id" not in ucols:
-            raise RuntimeError("urls 表结构异常")
+            raise RuntimeError("unexpected urls table schema")
 
         title_expr = "COALESCE(u.title,'')" if "title" in ucols else "''"
         typed_expr = "COALESCE(u.typed_count,0)" if "typed_count" in ucols else "0"
@@ -863,18 +863,18 @@ def ingest_chromium(
         register_urls(conn, url_id_map, url_rows, log, stats)
         record_titles(conn, url_id_map, url_titles, stats)
         if excluded_ids:
-            log(f"  排除 {human(len(excluded_ids))} 个链接（工具自身产生的页面）", level="debug")
-        log(f"  读取 {human(len(url_rows))} 个 URL", level="debug")
+            log(f"  excluded {human(len(excluded_ids))} links (pages produced by this tool)", level="debug")
+        log(f"  read {human(len(url_rows))} URLs", level="debug")
 
         # ---- 2) 访问记录 ----
         url_ref = "v.url" if "url" in vcols else None
         if url_ref is None:
-            raise RuntimeError("visits 表缺少 url 列")
+            raise RuntimeError("visits table is missing the url column")
         trans_expr = "v.transition" if "transition" in vcols else "0"
         dur_expr = "v.visit_duration" if "visit_duration" in vcols else "0"
         time_expr = "v.visit_time" if "visit_time" in vcols else None
         if time_expr is None:
-            raise RuntimeError("visits 表缺少 visit_time 列")
+            raise RuntimeError("visits table is missing the visit_time column")
 
         # urls.id -> 归档 url_id
         local_map: dict[int, int] = {}
@@ -942,8 +942,8 @@ def ingest_chromium(
         flush()
 
         if skipped:
-            log(f"  跳过 {human(skipped)} 条无效记录", level="debug")
-        log(f"  扫描 {human(considered)} 条访问记录", level="debug")
+            log(f"  skipped {human(skipped)} invalid records", level="debug")
+        log(f"  scanned {human(considered)} visit records", level="debug")
     finally:
         src.close()
 
@@ -960,7 +960,7 @@ def ingest_firefox(
     src = sqlite3.connect(str(db_path))
     try:
         if not table_exists(src, "moz_places") or not table_exists(src, "moz_historyvisits"):
-            raise RuntimeError("不是有效的 Firefox 历史库（缺少 moz_places 表）")
+            raise RuntimeError("not a valid Firefox history database (moz_places table is missing)")
 
         pcols = table_columns(src, "moz_places")
         vcols = table_columns(src, "moz_historyvisits")
@@ -997,7 +997,7 @@ def ingest_firefox(
                 url_titles.append((url, title))
         register_urls(conn, url_id_map, url_rows, log, stats)
         record_titles(conn, url_id_map, url_titles, stats)
-        log(f"  读取 {human(len(url_rows))} 个 URL", level="debug")
+        log(f"  read {human(len(url_rows))} URLs", level="debug")
 
         local_map: dict[int, int] = {}
         for raw_id, url in src.execute("SELECT id, url FROM moz_places WHERE url IS NOT NULL"):
@@ -1061,8 +1061,8 @@ def ingest_firefox(
         flush()
 
         if skipped:
-            log(f"  跳过 {human(skipped)} 条无效记录", level="debug")
-        log(f"  扫描 {human(considered)} 条访问记录", level="debug")
+            log(f"  skipped {human(skipped)} invalid records", level="debug")
+        log(f"  scanned {human(considered)} visit records", level="debug")
     finally:
         src.close()
 
@@ -1093,11 +1093,11 @@ def cmd_sync(args) -> int:
         wanted = {s.strip().lower() for s in args.source.split(",") if s.strip()}
         sources = [s for s in sources if s["browser"].lower() in wanted]
 
-    log(f"归档目录: {archive_dir}")
-    log(f"发现 {len(sources)} 个浏览器历史库")
+    log(f"archive directory: {archive_dir}")
+    log(f"found {len(sources)} browser history databases")
 
     if not sources:
-        log("没有找到任何浏览器历史库。用 detect 命令看看探测结果。", level="warn")
+        log("no browser history database found; run detect to see what was probed.", level="warn")
         log.close()
         return 1
 
@@ -1157,9 +1157,9 @@ def cmd_sync(args) -> int:
                 ok += 1
                 extra = ""
                 if new_visits and new_rows < new_visits:
-                    extra = f"  (其中 {human(new_visits - new_rows)} 条与已有记录合并计数)"
+                    extra = f"  ({human(new_visits - new_rows)} merged into existing visit records)"
                 log(
-                    f"{label}: 新增 {human(new_visits)} 条访问  ({fsize(src['path'])}){extra}",
+                    f"{label}: {human(new_visits)} new visits  ({fsize(src['path'])}){extra}",
                     level="ok",
                 )
             except Exception as exc:  # noqa: BLE001 — 单个浏览器失败不能影响其它
@@ -1168,7 +1168,7 @@ def cmd_sync(args) -> int:
                 except sqlite3.Error:
                     pass
                 fail += 1
-                log(f"{label}: 失败 -> {exc}", level="err")
+                log(f"{label}: failed -> {exc}", level="err")
                 try:
                     conn.execute(
                         "UPDATE sources SET last_status='error', last_message=?, last_sync_utc=?"
@@ -1205,22 +1205,22 @@ def cmd_sync(args) -> int:
         total_u = conn.execute("SELECT COUNT(*) FROM urls").fetchone()[0]
         log("")
         log(
-            f"本次新增: 访问 {human(stats['new_visits'])} 条 / 新 URL {human(stats['new_urls'])} 个",
+            f"this run: {human(stats['new_visits'])} visits / {human(stats['new_urls'])} new URLs",
             level="ok",
         )
         log(
-            f"归档总计: 访问 {human(total_v)} 条"
-            f"（去重后 {human(total_rows)} 行）/ URL {human(total_u)} 个"
+            f"archive total: {human(total_v)} visits"
+            f" ({human(total_rows)} rows after dedup) / {human(total_u)} URLs"
         )
         if stats["skipped_self"]:
-            log(f"已排除 {human(stats['skipped_self'])} 条自身产生的记录"
-                f"（归档页面被自己打开产生的访问）")
+            log(f"excluded {human(stats['skipped_self'])} records produced by this tool"
+                f" (visits caused by opening the archive pages themselves)")
         span = conn.execute(
             "SELECT MIN(visit_time_local), MAX(visit_time_local) FROM visits"
         ).fetchone()
         if span and span[0]:
-            log(f"覆盖时间: {span[0]}  ~  {span[1]}")
-        log(f"成功 {ok} 个 / 失败 {fail} 个")
+            log(f"time span: {span[0]}  ~  {span[1]}")
+        log(f"{ok} succeeded / {fail} failed")
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error:
@@ -1242,11 +1242,11 @@ def cmd_sync(args) -> int:
 def cmd_detect(args) -> int:
     sources = discover_all([Path(p) for p in (args.extra_root or [])])
     if not sources:
-        print("没有发现任何浏览器历史库。")
-        print("如果浏览器装在非默认位置，可以用 --extra-root 指定用户数据目录。")
+        print("No browser history database found.")
+        print("If a browser lives in a non-default location, pass its user data directory with --extra-root.")
         return 1
-    print(f"发现 {len(sources)} 个历史库:\n")
-    print(f"{'浏览器':<18}{'配置':<22}{'大小':>10}  路径")
+    print(f"Found {len(sources)} history databases:\n")
+    print(f"{'Browser':<18}{'Profile':<22}{'Size':>10}  Path")
     print("-" * 100)
     for s in sorted(sources, key=lambda x: (x["browser"], x["profile"])):
         print(f"{s['browser']:<18}{s['profile']:<22}{fsize(s['path']):>10}  {s['path']}")
@@ -1268,23 +1268,23 @@ def cmd_stats(args) -> int:
     span = conn.execute("SELECT MIN(visit_time_local), MAX(visit_time_local) FROM visits").fetchone()
 
     print("=" * 62)
-    print("  浏览历史归档统计")
+    print("  Browsing History Archive")
     print("=" * 62)
-    print(f"  归档库      : {args.archive / 'archive.sqlite'}  ({fsize(args.archive / 'archive.sqlite')})")
-    print(f"  访问记录    : {human(total_v)}   (数据行 {human(total_rows)})")
-    print(f"  独立 URL    : {human(total_u)}")
-    print(f"  历史标题    : {human(total_t)}")
-    print(f"  站点数      : {human(hosts)}")
+    print(f"  Database    : {args.archive / 'archive.sqlite'}  ({fsize(args.archive / 'archive.sqlite')})")
+    print(f"  Visits      : {human(total_v)}   (data rows {human(total_rows)})")
+    print(f"  Unique URLs : {human(total_u)}")
+    print(f"  Titles      : {human(total_t)}")
+    print(f"  Hosts       : {human(hosts)}")
     if span and span[0]:
-        print(f"  时间跨度    : {span[0]}  ~  {span[1]}")
+        print(f"  Time span   : {span[0]}  ~  {span[1]}")
     runs = conn.execute(
         "SELECT finished_utc, status, new_visits FROM sync_runs"
         " WHERE finished_utc IS NOT NULL ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if runs:
-        print(f"  上次归档    : {runs[0]}  ({runs[1]}, 新增 {human(runs[2] or 0)} 条)")
+        print(f"  Last sync   : {runs[0]}  ({runs[1]}, new {human(runs[2] or 0)})")
 
-    print("\n-- 按浏览器 --")
+    print("\n-- By browser --")
     rows = conn.execute(
         """
         SELECT s.browser, s.profile, COALESCE(SUM(v.dup_count),0) c, MAX(v.visit_time_local) last
@@ -1293,23 +1293,23 @@ def cmd_stats(args) -> int:
         """
     ).fetchall()
     for browser, profile, c, last in rows:
-        print(f"  {browser:<16}{profile:<20}{human(c):>12}   最近: {last or '-'}")
+        print(f"  {browser:<16}{profile:<20}{human(c):>12}   last: {last or '-'}")
 
-    print("\n-- 按年份 --")
+    print("\n-- By year --")
     for day, c in conn.execute(
         "SELECT substr(day,1,4) y, COALESCE(SUM(dup_count),0) c FROM visits"
         " GROUP BY y ORDER BY y DESC LIMIT 15"
     ):
         print(f"  {day}  {human(c):>12}")
 
-    print("\n-- 访问最多的站点 --")
+    print("\n-- Top hosts --")
     for host, c in conn.execute(
         "SELECT host, COALESCE(SUM(v.dup_count),0) c FROM visits v JOIN urls u ON u.id=v.url_id"
         " WHERE u.host <> '' GROUP BY u.host ORDER BY c DESC LIMIT 15"
     ):
         print(f"  {host:<45}{human(c):>10}")
 
-    print("\n-- 访问最多的页面 --")
+    print("\n-- Top pages --")
     for url, title, c in conn.execute(
         """
         SELECT u.url, COALESCE(u.latest_title,''), COALESCE(SUM(v.dup_count),0) c
@@ -1328,7 +1328,7 @@ def cmd_verify(args) -> int:
     conn = open_archive(args.archive, create=False)
     problems = 0
 
-    print("检查归档库完整性 …")
+    print("Checking archive integrity ...")
     for row in conn.execute("PRAGMA integrity_check"):
         print(f"  integrity_check: {row[0]}")
         if row[0] != "ok":
@@ -1337,7 +1337,7 @@ def cmd_verify(args) -> int:
     fk = conn.execute("PRAGMA foreign_key_check").fetchall()
     if fk:
         problems += 1
-        print(f"  外键错误: {len(fk)} 处")
+        print(f"  foreign key violations: {len(fk)}")
     else:
         print("  foreign_key_check: ok")
 
@@ -1349,7 +1349,7 @@ def cmd_verify(args) -> int:
     ).fetchone()[0]
     if orphan_v or orphan_s:
         problems += 1
-    print(f"  孤立访问记录: url={orphan_v}, source={orphan_s}")
+    print(f"  orphan visits: url={orphan_v}, source={orphan_s}")
 
     dupes = conn.execute(
         """
@@ -1362,19 +1362,19 @@ def cmd_verify(args) -> int:
         )
         """
     ).fetchone()[0]
-    print(f"  重复访问记录: {dupes}")
+    print(f"  duplicate visit rows: {dupes}")
     problems += 1 if dupes else 0
 
     bad_dup = conn.execute(
         "SELECT COUNT(*) FROM visits WHERE dup_count IS NULL OR dup_count < 1"
     ).fetchone()[0]
-    print(f"  重复计数异常: {bad_dup}")
+    print(f"  invalid dup_count: {bad_dup}")
     problems += 1 if bad_dup else 0
 
     bad_time = conn.execute(
         "SELECT COUNT(*) FROM visits WHERE visit_time_utc IS NULL OR visit_time_local IS NULL"
     ).fetchone()[0]
-    print(f"  时间字段缺失: {bad_time}")
+    print(f"  missing timestamps: {bad_time}")
     problems += 1 if bad_time else 0
 
     counts = conn.execute(
@@ -1384,10 +1384,10 @@ def cmd_verify(args) -> int:
         " (SELECT COUNT(*) FROM visits)"
     ).fetchone()
     print(
-        f"\n  访问记录={human(counts[0])} (数据行 {human(counts[4])})"
+        f"\n  visits={human(counts[0])} (data rows {human(counts[4])})"
         f"  urls={human(counts[1])}  titles={human(counts[2])}  sources={human(counts[3])}"
     )
-    print("\n结果: " + ("发现 %d 个问题" % problems if problems else "一切正常"))
+    print("\nResult: " + ("%d problem(s) found" % problems if problems else "all checks passed"))
     conn.close()
     return 1 if problems else 0
 
@@ -1458,8 +1458,8 @@ def load_viewer_template() -> str:
     path = viewer_template_path()
     if not path.is_file():
         raise SystemExit(
-            f"缺少页面模板: {path}\n"
-            f"它是网页本体，必须和 history_archive.py 放在同一个目录里。"
+            f"missing page template: {path}\n"
+            f"it is the page itself and must sit in the same directory as history_archive.py."
         )
     return path.read_text(encoding="utf-8")
 
@@ -1490,7 +1490,7 @@ def cmd_export(args) -> int:
                 w.writerow(row)
                 n += 1
         written.append(path)
-        print(f"[OK] CSV   {human(n)} 条 -> {path}")
+        print(f"[OK] CSV   {human(n)} rows -> {path}")
 
     # ---- JSONL ----
     if "jsonl" in formats:
@@ -1522,7 +1522,7 @@ def cmd_export(args) -> int:
                 )
                 n += 1
         written.append(path)
-        print(f"[OK] JSONL {human(n)} 条 -> {path}")
+        print(f"[OK] JSONL {human(n)} rows -> {path}")
 
     # ---- HTML ----
     if "html" in formats:
@@ -1537,15 +1537,15 @@ def cmd_export(args) -> int:
         path.write_text(render_viewer_html(args.archive, mode="static", rows=data),
                         encoding="utf-8")
         written.append(path)
-        extra = "" if len(data) < html_limit else f"（已截断到 {human(html_limit)} 条，完整数据看 CSV/JSONL）"
-        print(f"[OK] HTML  {human(len(data))} 条 -> {path}{extra}")
+        extra = "" if len(data) < html_limit else f" (truncated to {human(html_limit)} rows; see CSV/JSONL for the full data)"
+        print(f"[OK] HTML  {human(len(data))} rows -> {path}{extra}")
 
     if args.snapshot:
         snap_dir = out_dir / "snapshots" / stamps
         snap_dir.mkdir(parents=True, exist_ok=True)
         for p in written:
             shutil.copy2(p, snap_dir / p.name)
-        print(f"[OK] 快照已保存 -> {snap_dir}")
+        print(f"[OK] snapshot saved -> {snap_dir}")
 
     conn.close()
     return 0
@@ -1600,13 +1600,13 @@ def cmd_view(args) -> int:
             return rc
         page = out_dir / "history.html"
         if not page.exists():
-            print(f"[x] 没有生成 {page}")
+            print(f"[x] {page} was not generated")
             return 1
         if args.no_open:
-            print(f"\n静态快照已生成（只读）: {page}")
+            print(f"\nstatic snapshot generated (read-only): {page}")
             return 0
-        print(f"\n正在用默认浏览器打开静态快照: {page}")
-        print("（这是只读快照，TODO 不可用；需要 TODO 就用不带 --static 的 serve）")
+        print(f"\nopening the static snapshot in the default browser: {page}")
+        print("(read-only snapshot, so the TODO list is unavailable; use serve without --static for TODO)")
         return 0 if open_in_browser(page) else 1
 
     return cmd_serve(argparse.Namespace(
@@ -1638,23 +1638,23 @@ def cmd_purge(args) -> int:
     targets = [r for r in rows if not keep_url(r[1])]
 
     if not targets:
-        print("归档库里没有需要清理的自我引用记录。")
+        print("no self-referencing records to clean up in the archive.")
         conn.close()
         return 0
 
-    print("以下记录会被清除（它们都是工具自己产生的，没有信息量）：\n")
+    print("the following records will be removed (all produced by this tool, none of them carry information):\n")
     total_visits = 0
     for _uid, url, n, dup, first, last in targets:
         total_visits += dup
-        print(f"  {human(dup):>8} 次访问 · {human(n):>6} 行")
+        print(f"  {human(dup):>8} visits {human(n):>6} rows")
         print(f"           {url}")
         print(f"           {first} ~ {last}")
 
-    print(f"\n共 {len(targets)} 个 URL、{human(total_visits)} 条访问记录。")
+    print(f"\n{len(targets)} URLs, {human(total_visits)} visit records in total.")
 
     if not args.yes:
-        print("\n这是预演，什么都没有删除。确认无误后加 --yes 真正执行。")
-        print("（执行前会自动备份一份归档库）")
+        print("\nthis is a dry run, nothing was deleted. add --yes to do it for real.")
+        print("(the archive is backed up automatically before deleting)")
         conn.close()
         return 0
 
@@ -1671,7 +1671,7 @@ def cmd_purge(args) -> int:
         finally:
             out.close()
             raw.close()
-        print(f"\n[OK] 已备份 -> {dst}")
+        print(f"\n[OK] backed up -> {dst}")
 
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1685,7 +1685,7 @@ def cmd_purge(args) -> int:
             conn.execute("ROLLBACK")
         except sqlite3.Error:
             pass
-        print(f"[x] 删除失败，已回滚: {exc}")
+        print(f"[x] delete failed, rolled back: {exc}")
         conn.close()
         return 1
 
@@ -1695,7 +1695,7 @@ def cmd_purge(args) -> int:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except sqlite3.Error:
         pass
-    print(f"[OK] 清理完成。归档现在剩 {human(left_v)} 条访问 / {human(left_u)} 个 URL。")
+    print(f"[OK] cleanup done. the archive now holds {human(left_v)} visits / {human(left_u)} URLs.")
     conn.close()
     return 0
 
@@ -1725,7 +1725,7 @@ def todo_add(conn: sqlite3.Connection, item: dict) -> tuple[bool, str]:
     url = str(item.get("url") or "").strip()
     if kind == "url":
         if not url:
-            return False, "url 为空"
+            return False, "empty url"
         # 同一条链接已有未完成的记录就不重复添加
         dup = conn.execute(
             "SELECT 1 FROM todos WHERE kind='url' AND url=? AND done=0", (url,)
@@ -1818,19 +1818,19 @@ def cmd_exclude(args) -> int:
 
     if args.remove_all:
         save_exclude_patterns(archive_dir, [])
-        print("[OK] 已清空 exclude.txt")
+        print("[OK] exclude.txt cleared")
         words = []
 
     if not words:
-        print(f"排除配置: {exclude_file(archive_dir)}")
+        print(f"exclude config: {exclude_file(archive_dir)}")
         if not existing:
-            print("  （没有额外关键字；归档目录下的链接本来就默认排除）")
+            print("  (no extra keywords; links under the archive directory are excluded by default anyway)")
         else:
             for p in existing:
                 print(f"  {p}")
         print()
-        print("加一条:   python history_archive.py exclude bili-history.html")
-        print("删一条:   python history_archive.py exclude --remove bili-history.html")
+        print("add:    python history_archive.py exclude bili-history.html")
+        print("remove: python history_archive.py exclude --remove bili-history.html")
         return 0
 
     if args.remove:
@@ -1838,24 +1838,24 @@ def cmd_exclude(args) -> int:
         kept = [p for p in existing if p.lower() not in [w.lower() for w in words]]
         save_exclude_patterns(archive_dir, kept)
         for w in removed:
-            print(f"[OK] 已移除: {w}")
+            print(f"[OK] removed: {w}")
         missing = [w for w in words if w.lower() not in [p.lower() for p in existing]]
         for w in missing:
-            print(f"[!] 本来就没有: {w}")
+            print(f"[!] not present: {w}")
         return 0
 
     merged = list(existing)
     for w in words:
         if w.lower() in [p.lower() for p in merged]:
-            print(f"[!] 已经在里面了: {w}")
+            print(f"[!] already present: {w}")
         else:
             merged.append(w)
-            print(f"[OK] 已添加: {w}")
+            print(f"[OK] added: {w}")
     path = save_exclude_patterns(archive_dir, merged)
-    print(f"\n配置写在 {path}，下次 sync（包括计划任务）会自动生效。")
-    print("已经归档进去的记录用 purge 清掉：")
-    print("  python history_archive.py purge        # 先预演")
-    print("  python history_archive.py purge --yes  # 真删（会先自动备份）")
+    print(f"\nconfig written to {path}; it takes effect on the next sync (scheduled runs included).")
+    print("to remove records that are already archived, use purge:")
+    print("  python history_archive.py purge        # dry run first")
+    print("  python history_archive.py purge --yes  # really delete (backup first)")
     return 0
 
 
@@ -1923,7 +1923,7 @@ def build_handler(archive_dir: Path, token: str, state: dict):
                         got = v
                         break
             if not got or not hmac.compare_digest(str(got), token):
-                self._err(403, "缺少或错误的访问令牌，请用 serve 命令打印的地址打开。")
+                self._err(403, "missing or wrong access token; open the URL printed by the serve command.")
                 return False
             return True
 
@@ -1979,28 +1979,28 @@ def build_handler(archive_dir: Path, token: str, state: dict):
                 with lock:
                     self._json({"ok": True, "todos": todo_list(state["conn"])})
             else:
-                self._err(404, "没有这个地址")
+                self._err(404, "no such endpoint")
 
         def do_POST(self):
             path = urlsplit(self.path).path
             if not self._check_token():
                 return
             if not self._check_origin():
-                self._err(403, "跨站请求被拒绝")
+                self._err(403, "cross-site request rejected")
                 return
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
             if ctype != "application/json":
                 # 强制 JSON 也挡掉一批简单的跨站表单提交
-                self._err(415, "只接受 application/json")
+                self._err(415, "only application/json is accepted")
                 return
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > 8 * 1024 * 1024:
-                    self._err(413, "请求体过大")
+                    self._err(413, "request body too large")
                     return
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError) as exc:
-                self._err(400, f"请求体不是合法 JSON: {exc}")
+                self._err(400, f"request body is not valid JSON: {exc}")
                 return
 
             if path == "/api/todos":
@@ -2012,8 +2012,8 @@ def build_handler(archive_dir: Path, token: str, state: dict):
                         msg = ""
                         if action == "add":
                             changed, why = todo_add(conn, payload.get("item") or {})
-                            msg = {"dup": "这条链接已经在未完成的 TODO 里了",
-                                   "empty": "内容不能为空"}.get(why, why)
+                            msg = {"dup": "this link is already in the unfinished TODO list",
+                                   "empty": "content cannot be empty"}.get(why, why)
                         elif action == "toggle":
                             changed = todo_toggle(conn, payload.get("id") or "")
                         elif action == "update":
@@ -2023,15 +2023,15 @@ def build_handler(archive_dir: Path, token: str, state: dict):
                             changed = todo_remove(conn, payload.get("id") or "")
                         elif action == "clear_done":
                             changed = True
-                            msg = f"已清除 {todo_clear_done(conn)} 条"
+                            msg = f"cleared {todo_clear_done(conn)} item(s)"
                         elif action == "import":
                             res = todo_import(conn, payload.get("items") or [])
                             changed = True
-                            msg = (f"新增 {res['added']} 条"
-                                   + (f"，跳过 {res['skipped']} 条" if res["skipped"] else ""))
+                            msg = (f"added {res['added']} item(s)"
+                                   + (f", skipped {res['skipped']} item(s)" if res["skipped"] else ""))
                         else:
                             conn.execute("ROLLBACK")
-                            self._err(400, f"不认识的操作: {action}")
+                            self._err(400, f"unknown action: {action}")
                             return
                         conn.execute("COMMIT")
                     except sqlite3.Error as exc:
@@ -2039,7 +2039,7 @@ def build_handler(archive_dir: Path, token: str, state: dict):
                             conn.execute("ROLLBACK")
                         except sqlite3.Error:
                             pass
-                        self._err(500, f"写库失败: {exc}")
+                        self._err(500, f"database write failed: {exc}")
                         return
                     self._json({"ok": True, "changed": bool(changed), "message": msg,
                                 "todos": todo_list(conn)})
@@ -2047,13 +2047,13 @@ def build_handler(archive_dir: Path, token: str, state: dict):
                 try:
                     new = run_sync_once(archive_dir, state)
                 except Exception as exc:  # noqa: BLE001
-                    self._err(500, f"同步失败: {exc}")
+                    self._err(500, f"sync failed: {exc}")
                     return
                 with lock:
                     rows = rows_payload(state["conn"])
                 self._json({"ok": True, "new_visits": new, "rows": rows})
             else:
-                self._err(404, "没有这个地址")
+                self._err(404, "no such endpoint")
 
         do_HEAD = do_GET
 
@@ -2090,7 +2090,7 @@ def cmd_serve(args) -> int:
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", int(args.port)), handler)
     except OSError as exc:
-        print(f"[x] 端口 {args.port} 起不来: {exc}")
+        print(f"[x] cannot bind port {args.port}: {exc}")
         conn.close()
         return 1
     httpd.daemon_threads = True
@@ -2100,14 +2100,14 @@ def cmd_serve(args) -> int:
     # 注意 flush：输出被重定向到管道/文件时，print 默认是块缓冲，
     # 用户会看着一片空白等不到那行地址。
     print("=" * 62, flush=True)
-    print("  浏览历史归档 · 本地服务已启动", flush=True)
+    print("  Browsing History Archive - local server started", flush=True)
     print("=" * 62, flush=True)
-    print(f"  地址   : {url}", flush=True)
-    print(f"  归档库 : {archive_dir / 'archive.sqlite'}", flush=True)
-    print(f"  监听   : 127.0.0.1:{port}（只有本机能访问，局域网和外网都到不了）", flush=True)
-    print(f"  令牌   : 已写在地址里，每次启动都不一样", flush=True)
+    print(f"  URL     : {url}", flush=True)
+    print(f"  Archive : {archive_dir / 'archive.sqlite'}", flush=True)
+    print(f"  Listen  : 127.0.0.1:{port} (reachable from this machine only, not from the LAN or the internet)", flush=True)
+    print(f"  Token   : embedded in the URL above, regenerated on every start", flush=True)
     print(flush=True)
-    print("  按 Ctrl+C 停止", flush=True)
+    print("  press Ctrl+C to stop", flush=True)
     print(flush=True)
 
     if not args.no_open:
@@ -2116,7 +2116,7 @@ def cmd_serve(args) -> int:
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n正在停止…")
+        print("\nstopping ...")
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -2131,7 +2131,7 @@ def cmd_serve(args) -> int:
 def cmd_backup(args) -> int:
     src_path = args.archive / "archive.sqlite"
     if not src_path.exists():
-        print(f"归档库不存在: {src_path}")
+        print(f"archive database not found: {src_path}")
         return 1
     bk_dir = args.backup_dir or (args.archive / "backups")
     bk_dir.mkdir(parents=True, exist_ok=True)
@@ -2144,7 +2144,7 @@ def cmd_backup(args) -> int:
     finally:
         dst_conn.close()
         src.close()
-    print(f"[OK] 备份 -> {dst}  ({fsize(dst)})")
+    print(f"[OK] backup -> {dst}  ({fsize(dst)})")
 
     keep = int(args.keep)
     if keep > 0:
@@ -2152,9 +2152,9 @@ def cmd_backup(args) -> int:
         for old in files[:-keep]:
             try:
                 old.unlink()
-                print(f"     清理旧备份 {old.name}")
+                print(f"     removing old backup {old.name}")
             except OSError as exc:
-                print(f"     清理失败 {old.name}: {exc}")
+                print(f"     failed to remove {old.name}: {exc}")
     return 0
 
 
@@ -2165,14 +2165,14 @@ def cmd_backup(args) -> int:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="history_archive.py",
-        description="浏览器历史永久归档器（增量写入本地 SQLite，永不丢失）",
+        description="Permanent browser history archiver (incremental, local SQLite, nothing is ever dropped)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "示例:\n"
-            "  python history_archive.py                    # 归档一次\n"
-            "  python history_archive.py view               # 直接打开网页版历史记录\n"
-            "  python history_archive.py sync -v            # 归档并打印细节\n"
-            "  python history_archive.py detect             # 只探测有哪些历史库\n"
+            "Examples:\n"
+            "  python history_archive.py                    # archive once\n"
+            "  python history_archive.py view               # open the web view of the history\n"
+            "  python history_archive.py sync -v            # archive and print details\n"
+            "  python history_archive.py detect             # only probe for history databases\n"
             "  python history_archive.py export --format html,csv\n"
             "  python history_archive.py stats\n"
             "  python history_archive.py backup --keep 30\n"
@@ -2182,7 +2182,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--archive",
         type=Path,
         default=DEFAULT_ARCHIVE,
-        help=f"归档目录（默认 {DEFAULT_ARCHIVE}）",
+        help=f"archive directory (default {DEFAULT_ARCHIVE})",
     )
     # 子命令里也要能写 --archive（例如 sync --archive D:\x）。
     # 用 SUPPRESS 做默认值，避免子解析器把主解析器已经解析到的值覆盖成 None。
@@ -2191,71 +2191,71 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--archive",
         type=Path,
         default=argparse.SUPPRESS,
-        help="归档目录（默认 <脚本目录>/archive）",
+        help="archive directory (default <script dir>/archive)",
     )
     sub = parser.add_subparsers(dest="command")
 
-    p_sync = sub.add_parser("sync", parents=[common], help="把浏览器历史增量归档（默认命令）")
-    p_sync.add_argument("-v", "--verbose", action="store_true", help="输出详细日志")
-    p_sync.add_argument("--source", default="all", help="只归档指定浏览器，逗号分隔，如 chrome,edge")
-    p_sync.add_argument("--extra-root", action="append", help="额外的用户数据目录（可重复）")
+    p_sync = sub.add_parser("sync", parents=[common], help="incrementally archive browser history (default command)")
+    p_sync.add_argument("-v", "--verbose", action="store_true", help="print verbose logs")
+    p_sync.add_argument("--source", default="all", help="archive only the given browsers, comma-separated, e.g. chrome,edge")
+    p_sync.add_argument("--extra-root", action="append", help="extra user data directories (repeatable)")
     p_sync.add_argument("--exclude", action="append",
-                        help="额外排除包含该关键字的链接（可重复），如 --exclude bili-history.html")
+                        help="also exclude links containing this keyword (repeatable), e.g. --exclude bili-history.html")
     p_sync.add_argument("--no-self-exclude", action="store_true",
-                        help="不排除归档目录下的链接（默认会排除，避免把自己的页面收进来）")
+                        help="do not exclude links under the archive directory (excluded by default so this tool's own pages stay out)")
 
-    p_detect = sub.add_parser("detect", parents=[common], help="列出探测到的浏览器历史库")
-    p_detect.add_argument("--extra-root", action="append", help="额外的用户数据目录（可重复）")
+    p_detect = sub.add_parser("detect", parents=[common], help="list the browser history databases that were found")
+    p_detect.add_argument("--extra-root", action="append", help="extra user data directories (repeatable)")
 
-    sub.add_parser("stats", parents=[common], help="显示归档统计")
+    sub.add_parser("stats", parents=[common], help="show archive statistics")
 
-    sub.add_parser("verify", parents=[common], help="校验归档库完整性")
+    sub.add_parser("verify", parents=[common], help="verify archive database integrity")
 
-    p_export = sub.add_parser("export", parents=[common], help="导出 CSV / JSONL / HTML")
-    p_export.add_argument("--format", default="csv,jsonl,html", help="导出格式，逗号分隔")
-    p_export.add_argument("--out", type=Path, default=None, help="导出目录（默认 <归档>/exports）")
-    p_export.add_argument("--since", default=None, help="起始日期 YYYY-MM-DD")
-    p_export.add_argument("--until", default=None, help="结束日期 YYYY-MM-DD")
-    p_export.add_argument("--browser", default=None, help="只导出指定浏览器，逗号分隔")
-    p_export.add_argument("--contains", default=None, help="只导出 URL/标题包含该文本的记录")
-    p_export.add_argument("--limit", type=int, default=None, help="最多导出多少条")
-    p_export.add_argument("--html-limit", type=int, default=None, help="HTML 内嵌条数上限（默认 100000）")
-    p_export.add_argument("--snapshot", action="store_true", help="同时保存一份带时间戳的快照")
+    p_export = sub.add_parser("export", parents=[common], help="export CSV / JSONL / HTML")
+    p_export.add_argument("--format", default="csv,jsonl,html", help="export formats, comma-separated")
+    p_export.add_argument("--out", type=Path, default=None, help="export directory (default <archive>/exports)")
+    p_export.add_argument("--since", default=None, help="start date YYYY-MM-DD")
+    p_export.add_argument("--until", default=None, help="end date YYYY-MM-DD")
+    p_export.add_argument("--browser", default=None, help="export only the given browsers, comma-separated")
+    p_export.add_argument("--contains", default=None, help="export only records whose URL/title contains this text")
+    p_export.add_argument("--limit", type=int, default=None, help="maximum number of records to export")
+    p_export.add_argument("--html-limit", type=int, default=None, help="maximum number of rows embedded in the HTML (default 100000)")
+    p_export.add_argument("--snapshot", action="store_true", help="also save a timestamped snapshot")
 
-    p_view = sub.add_parser("view", parents=[common], help="启动本地服务并打开（默认）")
-    p_view.add_argument("--out", type=Path, default=None, help="静态模式的导出目录")
-    p_view.add_argument("--since", default=None, help="静态模式：起始日期 YYYY-MM-DD")
-    p_view.add_argument("--until", default=None, help="静态模式：结束日期 YYYY-MM-DD")
-    p_view.add_argument("--browser", default=None, help="静态模式：只导出指定浏览器")
-    p_view.add_argument("--contains", default=None, help="静态模式：只导出含该文本的记录")
-    p_view.add_argument("--limit", type=int, default=None, help="静态模式：最多多少条")
-    p_view.add_argument("--html-limit", type=int, default=None, help="静态模式：内嵌条数上限")
+    p_view = sub.add_parser("view", parents=[common], help="start the local server and open it (default)")
+    p_view.add_argument("--out", type=Path, default=None, help="static mode: export directory")
+    p_view.add_argument("--since", default=None, help="static mode: start date YYYY-MM-DD")
+    p_view.add_argument("--until", default=None, help="static mode: end date YYYY-MM-DD")
+    p_view.add_argument("--browser", default=None, help="static mode: export only the given browser")
+    p_view.add_argument("--contains", default=None, help="static mode: export only records containing this text")
+    p_view.add_argument("--limit", type=int, default=None, help="static mode: maximum number of records")
+    p_view.add_argument("--html-limit", type=int, default=None, help="static mode: maximum number of rows to embed")
     p_view.add_argument("--static", action="store_true",
-                        help="不起服务，生成自包含的只读快照文件")
-    p_view.add_argument("--port", type=int, default=0, help="服务端口（默认自动挑一个空闲的）")
-    p_view.add_argument("-v", "--verbose", action="store_true", help="打印每个请求")
-    p_view.add_argument("--no-open", action="store_true", help="只启动，不自动打开浏览器")
+                        help="do not serve; generate a self-contained read-only snapshot file")
+    p_view.add_argument("--port", type=int, default=0, help="server port (default: pick a free one automatically)")
+    p_view.add_argument("-v", "--verbose", action="store_true", help="print every request")
+    p_view.add_argument("--no-open", action="store_true", help="start only; do not open the browser")
 
-    p_serve = sub.add_parser("serve", parents=[common], help="启动本地服务（不自动打开浏览器）")
-    p_serve.add_argument("--port", type=int, default=0, help="服务端口（默认自动挑一个空闲的）")
-    p_serve.add_argument("-v", "--verbose", action="store_true", help="打印每个请求")
-    p_serve.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
+    p_serve = sub.add_parser("serve", parents=[common], help="start the local server (does not open the browser)")
+    p_serve.add_argument("--port", type=int, default=0, help="server port (default: pick a free one automatically)")
+    p_serve.add_argument("-v", "--verbose", action="store_true", help="print every request")
+    p_serve.add_argument("--no-open", action="store_true", help="do not open the browser")
 
-    p_backup = sub.add_parser("backup", parents=[common], help="备份归档数据库")
-    p_backup.add_argument("--keep", type=int, default=30, help="保留最近多少份备份（默认 30，0=不清理）")
-    p_backup.add_argument("--backup-dir", type=Path, default=None, help="备份目录")
+    p_backup = sub.add_parser("backup", parents=[common], help="back up the archive database")
+    p_backup.add_argument("--keep", type=int, default=30, help="how many recent backups to keep (default 30, 0=keep all)")
+    p_backup.add_argument("--backup-dir", type=Path, default=None, help="backup directory")
 
-    p_purge = sub.add_parser("purge", parents=[common], help="清除归档里工具自身产生的记录")
-    p_purge.add_argument("--yes", action="store_true", help="真正执行删除（默认只预演）")
-    p_purge.add_argument("--no-backup", action="store_true", help="删除前不备份（不建议）")
-    p_purge.add_argument("--exclude", action="append", help="额外排除包含该关键字的链接（可重复）")
-    p_purge.add_argument("--no-self-exclude", action="store_true", help="不把归档目录算作自我引用")
+    p_purge = sub.add_parser("purge", parents=[common], help="remove the records this tool produced itself from the archive")
+    p_purge.add_argument("--yes", action="store_true", help="really delete (default is a dry run)")
+    p_purge.add_argument("--no-backup", action="store_true", help="skip the backup before deleting (not recommended)")
+    p_purge.add_argument("--exclude", action="append", help="also exclude links containing this keyword (repeatable)")
+    p_purge.add_argument("--no-self-exclude", action="store_true", help="do not treat the archive directory as self-referencing")
 
     p_excl = sub.add_parser("exclude", parents=[common],
-                            help="管理额外排除的链接关键字（持久生效，计划任务也会用）")
-    p_excl.add_argument("words", nargs="*", help="要添加（或配合 --remove 删除）的关键字")
-    p_excl.add_argument("--remove", action="store_true", help="删除这些关键字而不是添加")
-    p_excl.add_argument("--clear", dest="remove_all", action="store_true", help="清空全部关键字")
+                            help="manage extra excluded link keywords (persistent; scheduled runs use them too)")
+    p_excl.add_argument("words", nargs="*", help="keywords to add (or, with --remove, to delete)")
+    p_excl.add_argument("--remove", action="store_true", help="remove these keywords instead of adding them")
+    p_excl.add_argument("--clear", dest="remove_all", action="store_true", help="clear all keywords")
 
     commands = {"sync", "detect", "stats", "verify", "export", "view", "serve",
                 "backup", "purge", "exclude"}
@@ -2306,18 +2306,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "exclude":
             return cmd_exclude(args)
     except KeyboardInterrupt:
-        print("\n已中断")
+        print("\ninterrupted")
         return 130
     except sqlite3.DatabaseError as exc:
-        print(f"[x] 数据库错误: {exc}")
+        print(f"[x] database error: {exc}")
         return 1
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001
-        print(f"[x] 出错: {exc}")
+        print(f"[x] error: {exc}")
         return 1
 
-    print("未知命令，用 -h 查看帮助")
+    print("unknown command; use -h for help")
     return 2
 
 
