@@ -434,7 +434,8 @@ node test_viewer.js       # 页面纯逻辑（筛选/正则/词云/TODO 展示�
 
 | 文件 | 作用 |
 | --- | --- |
-| `history_archive.py` | 主程序，全部功能都在这里 |
+| `history_archive.py` | 主程序：探测、归档、统计、服务 |
+| `viewer.html` | **网页本体**（HTML/CSS/JS），由 Python 读取后填充数据 |
 | `install-task.ps1` | 注册 / 卸载 Windows 计划任务 |
 | `test_filters.py` | 链接过滤测试（`python test_filters.py`） |
 | `test_firefox.py` | Firefox 归档路径的测试（`python test_firefox.py`） |
@@ -442,9 +443,13 @@ node test_viewer.js       # 页面纯逻辑（筛选/正则/词云/TODO 展示�
 | `test_viewer.js` | 页面纯逻辑的测试（`node test_viewer.js`） |
 | `LICENSE` | MIT |
 | `<归档目录>/archive.sqlite` | **归档数据库本体，这就是你的永久历史** |
+| `<归档目录>/exclude.txt` | 额外排除关键字 |
 | `<归档目录>/exports/` | 导出的 CSV / JSONL / HTML |
 | `<归档目录>/logs/` | 每次归档的日志 |
 | `<归档目录>/backups/` | `backup` 命令产生的备份 |
+
+> `viewer.html` 是网页本体，必须和 `history_archive.py` 放在同一目录。
+> 它不被打包进 Python 源码，改完**刷新页面就生效，服务不用重启**。
 
 > 归档目录默认是脚本同级的 `archive/`，已被 `.gitignore` 排除——
 > **你的浏览记录不会被提交进 git**，clone 和推送的永远只有源码。

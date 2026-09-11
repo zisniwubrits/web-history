@@ -442,6 +442,21 @@ eq(html.indexOf('@media') >= 0, true, '有窄屏适配');
 eq(/td\.br\s*{[^}]*word-break/.test(html), true, '浏览器列允许换行，不会撑宽表格');
 eq(/td\.br\s*{[^}]*white-space:\s*nowrap/.test(html), false, '浏览器列不再强制不换行');
 
+console.log('\n--- TODO 按钮独占一列（对齐）---');
+// 跟着文字排的话，按钮横向位置会随前面文字长短飘，一整列参差不齐
+eq(/const tdTodo = document\.createElement\('td'\)/.test(html), true,
+   '按钮放在自己新建的单元格里');
+eq(/tdTodo\.className = 'todo'/.test(html), true, '该单元格用 .todo 类');
+eq(/tr\.append\(tdT, tdB, tdU, tdX, tdTodo\)/.test(html), true, '每行追加 5 个单元格');
+eq(/tdX\.appendChild\(todoBtn\)/.test(html), false, '按钮不再挂到类型单元格里');
+// 注意：不能用 /<th[^>]*>/ ，那会把 <thead> 也算进去
+const ths = [...html.matchAll(/<th(?:\s[^>]*)?>/g)].map(m => m[0]);
+eq(ths.length, 5, `表头有 5 列（实际 ${ths.length}）`);
+eq(/<th style="width:52px"><\/th>/.test(html), true, '最后一列是固定宽度的空表头');
+eq(/td\.todo\s*{[^}]*text-align:\s*center/.test(html), true, '按钮列居中，纵向对齐');
+eq(/td\.colSpan = 5/.test(html), true, '空结果行的 colSpan 跟着改成 5');
+eq(/td\.className = 'empty'/.test(html), true, '空结果行仍然带 .empty 类');
+
 console.log('\n--- 主题令牌（对齐 DSH 暗色主题）---');
 const DSH = {
   '#151517': 'bg-base',

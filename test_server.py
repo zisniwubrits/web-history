@@ -142,6 +142,32 @@ def main() -> int:
         eq(body["rows"][0][5], "https://example.com/a", "第 6 列是 URL")
         eq(body["rows"][0][3], "Default", "第 4 列是配置名")
 
+        print("\n--- 页面模板是独立文件 ---")
+        # 以前模板内嵌在 .py 里（占 42% 的篇幅），拆出来后编辑器才有高亮/补全，
+        # 也不会再有 Python 字符串转义吃掉模板反斜杠的问题。
+        eq(ha.VIEWER_TEMPLATE_NAME, "viewer.html", "模板文件名")
+        tpl_path = ha.viewer_template_path()
+        eq(tpl_path.parent, Path(ha.__file__).resolve().parent,
+           "模板必须和 history_archive.py 同目录")
+        check(tpl_path.is_file(), "模板文件存在", str(tpl_path))
+        tpl = ha.load_viewer_template()
+        check("<!doctype html>" in tpl.lower(), "模板是完整的 HTML")
+        check("__DATA__" in tpl, "模板里有数据占位符 __DATA__")
+        check("__MODE__" in tpl, "模板里有模式占位符 __MODE__")
+        eq("HTML_TEMPLATE" in dir(ha), False, "Python 里不再内嵌 HTML_TEMPLATE")
+        check(len(tpl.splitlines()) > 1000,
+              "模板确实被完整搬出去了（%d 行）" % len(tpl.splitlines()))
+
+        # 不做缓存：改完模板刷新页面就生效，服务不用重启
+        original = tpl_path.read_bytes()
+        try:
+            tpl_path.write_bytes(original.replace(b"<title>", b"<title>[hot]"))
+            check("[hot]" in ha.load_viewer_template(),
+                  "重新读取拿到的是磁盘上的最新内容（没有缓存）")
+        finally:
+            tpl_path.write_bytes(original)
+        check("[hot]" not in ha.load_viewer_template(), "测试后模板已还原")
+
         print("\n--- 未知地址 ---")
         st, body = c.get("/api/nope")
         eq(st, 404, "未知接口返回 404")

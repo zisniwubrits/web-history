@@ -1,0 +1,1675 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>浏览历史归档</title>
+<style>
+  /* ======================================================================
+     配色与排版令牌取自 DSH Web GUI 的暗色主题（--dsw-static-* / --dsw-alias-* /
+     --dsw-font-* / --dsl-*-radius），左侧注释标明对应关系，方便将来重新对齐。
+     ====================================================================== */
+  :root {
+    color-scheme: dark;
+
+    /* 背景层（DSH: bg-base / bg-layer-1..3） */
+    --bg-base:    #151517;
+    --bg-layer-1: #232324;
+    --bg-layer-2: #2c2c2e;
+    --bg-layer-3: #353638;
+
+    /* 描边（DSH: border-l1 / l2 / l3） */
+    --border-l1: #ffffff0f;
+    --border-l2: #ffffff1f;
+    --border-l3: #ffffff29;
+
+    /* 文字（DSH: label-primary / secondary / tertiary / caption） */
+    --label-primary:   #f9fafb;
+    --label-secondary: #cfd3d6;
+    --label-tertiary:  #adb2b8;
+    --label-caption:   #81858c;
+    --on-light:        #0f1115;
+
+    /* 交互态（DSH: interactive-bg-hover / active） */
+    --hover:  #ffffff14;
+    --active: #ffffff24;
+
+    /* 强调与状态色（DSH: static-blue-450 / deepseek-450 / red-400 / amber-500 / amber-400） */
+    --accent:        #4d93f8;
+    --accent-strong: #5686fe;
+    --danger:        #f25a5a;
+    --warn:          #f59e0b;
+    --warn-text:     #f7ad31;
+
+    /* 字体（DSH: --dsw-font-family / --ds-font-family-code） */
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+                 Helvetica, Arial, sans-serif;
+    --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas,
+                 "Liberation Mono", Menlo, Courier, "PingFang SC", "Microsoft YaHei";
+
+    /* 圆角与动效（DSH: 输入框 8px / 卡片 12px / 按钮胶囊 18px；--ds-ease-in-out） */
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-pill: 18px;
+    --dur: .2s;
+    --ease: cubic-bezier(.4, 0, .2, 1);
+
+    /* 布局 */
+    --maxw: 1180px;
+    --pad: 20px;
+    --headh: 0px;          /* 顶部筛选栏实测高度，由 JS 回填 */
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg-base); color:var(--label-primary);
+         font:14px/22px var(--font-sans);
+         -webkit-font-smoothing:antialiased; }
+
+  /* DSH 的滚动条：8px 宽、圆角、hover 变亮 */
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-thumb { background:#3c3c3d; border-radius:4px; }
+  ::-webkit-scrollbar-thumb:hover { background:#65676b; }
+  ::-webkit-scrollbar-track { background:transparent; }
+
+  /* 居中限宽容器：背景仍然通栏，内容收在中间 */
+  .wrap { max-width:var(--maxw); margin:0 auto; padding:0 var(--pad); }
+
+  header { position:sticky; top:0; z-index:5; background:var(--bg-base);
+           border-bottom:1px solid var(--border-l1); padding:14px 0 12px; }
+  header .wrap { display:flex; flex-direction:column; }
+  h1 { margin:0 0 12px; font-size:16px; line-height:24px; font-weight:600;
+       display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  h1 .count { font-size:13px; line-height:20px; font-weight:400;
+              color:var(--label-caption); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+
+  /* 输入框：对齐 DSH 的 32px 高 + 8px 圆角 + layer-1 底色 */
+  input, select { height:32px; padding:0 10px; font:14px/22px var(--font-sans);
+                  color:var(--label-primary); background:var(--bg-layer-1);
+                  border:1px solid var(--border-l2); border-radius:var(--radius-sm);
+                  transition:border-color var(--dur) var(--ease),
+                             background-color var(--dur) var(--ease); }
+  input:hover, select:hover { background:var(--bg-layer-2); }
+  input:focus, select:focus { outline:none; border-color:var(--accent); }
+  input#q { flex:1 1 240px; min-width:180px; }
+  input#q.invalid { border-color:var(--danger); }
+  input[type=date] { color-scheme:dark; }
+
+  /* 按钮：DSH 的胶囊形（18px 圆角、36px 高，这里压到 32px 与输入框齐平） */
+  button { height:32px; padding:0 14px; font:14px/22px var(--font-sans);
+           color:var(--label-primary); background:transparent;
+           border:1px solid var(--border-l2); border-radius:var(--radius-pill);
+           cursor:pointer; white-space:nowrap;
+           transition:background-color var(--dur) var(--ease),
+                      border-color var(--dur) var(--ease),
+                      color var(--dur) var(--ease); }
+  button:hover { background:var(--hover); }
+  button:active { background:var(--active); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+
+  /* 正则开关：选中态用 DSH 的 ghost-active（layer-3 填充 + 1px 内描边） */
+  .toggle { font-family:var(--font-mono); letter-spacing:1px; padding:0 12px; }
+  .toggle.on { color:var(--accent); background:var(--bg-layer-3);
+               box-shadow:inset 0 0 0 1px var(--border-l3); }
+
+  .err { margin-top:10px; padding:8px 12px; border-radius:var(--radius-sm);
+         font-size:13px; line-height:20px;
+         background:#f25a5a24; border:1px solid #f25a5a66; color:var(--danger); }
+  mark { background:#f59e0b3d; color:var(--warn-text);
+         border-radius:3px; padding:0 1px; }
+
+  /* ---- 时间条件区：选了「指定某一天 / 自定义范围」才出现 ---- */
+  .cond { margin-top:10px; padding:10px 12px; border-radius:var(--radius-sm);
+          background:var(--bg-layer-1); border:1px solid var(--border-l1); }
+  .condLabel { color:var(--label-secondary); font-size:13px; line-height:20px; }
+  .hint { color:var(--label-caption); font-size:13px; line-height:20px; }
+
+  /* ---- 已生效的筛选条件：DSH 的 pill（24px 高 / 12px 圆角）---- */
+  .chips { margin-top:10px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .chip { display:inline-flex; align-items:center; gap:6px; height:24px;
+          padding:0 6px 0 10px; font-size:12px; line-height:18px;
+          color:var(--label-secondary); background:var(--bg-layer-2);
+          border:1px solid var(--border-l1); border-radius:var(--radius-md); }
+  .chip b { font-weight:500; color:var(--label-primary); }
+  .chip button { height:18px; width:18px; padding:0; font-size:13px; line-height:1;
+                 color:var(--label-caption); background:transparent; border:none;
+                 border-radius:50%; }
+  .chip button:hover { background:var(--hover); color:var(--label-primary); }
+  .stat { color:var(--label-caption); font-size:13px; line-height:20px; margin-top:10px; }
+
+  table { width:100%; border-collapse:collapse; table-layout:fixed; }
+  th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border-l1);
+           vertical-align:top; }
+  /* top 用实测的筛选栏高度，否则表头会被顶部栏挡住 */
+  th { position:sticky; top:var(--headh); z-index:4; background:var(--bg-base);
+       color:var(--label-caption); font-size:12px; line-height:18px; font-weight:500;
+       border-bottom:1px solid var(--border-l2); }
+  tbody tr { transition:background-color var(--dur) var(--ease); }
+  tbody tr:hover { background:var(--hover); }
+  td.time { white-space:nowrap; color:var(--label-tertiary); font-size:13px;
+            font-variant-numeric:tabular-nums; }
+  td.br { color:var(--label-caption); font-size:13px; word-break:break-word; }
+  td.empty { padding:44px 12px; text-align:center; color:var(--label-caption); }
+  td.empty button { margin-left:8px; }
+  a { color:var(--accent); text-decoration:none; word-break:break-all; }
+  a:hover { text-decoration:underline; }
+  .title { color:var(--label-primary); }
+  .host { color:var(--label-caption); font-size:12px; line-height:18px; }
+
+  /* 主按钮：DSH 的 primary（浅底深字），用在「加载更多」上 */
+  #more { display:block; margin:20px auto 48px; height:36px; padding:0 20px;
+          color:var(--on-light); background:var(--label-primary);
+          border-color:transparent; font-weight:500; }
+  #more:hover { background:#ebeef2; }
+
+  /* ---- 分段控件（DSH 的 ghost-active 选中态）---- */
+  .seg { display:inline-flex; gap:2px; padding:2px; background:var(--bg-layer-1);
+         border:1px solid var(--border-l1); border-radius:var(--radius-pill); }
+  .seg button { height:26px; padding:0 12px; font-size:13px;
+                color:var(--label-tertiary); background:transparent;
+                border:none; border-radius:14px; }
+  .seg button:hover { background:var(--hover); color:var(--label-primary); }
+  .seg button.on { color:var(--label-primary); background:var(--bg-layer-3);
+                   box-shadow:inset 0 0 0 1px var(--border-l3); }
+  h1 .seg { margin-left:auto; }
+
+  /* ---- 词云 ---- */
+  #cloudView { padding:20px 0 48px; }
+  .cloudBar { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+              margin-bottom:12px; }
+  .cloudBar .hint { margin-left:auto; }
+  #cloudWrap { position:relative; overflow:hidden;
+               background:var(--bg-layer-1);
+               border:1px solid var(--border-l1); border-radius:var(--radius-md); }
+  #cloud { display:block; width:100%; cursor:pointer; }
+  #cloudTip { position:absolute; left:0; top:0; opacity:0; pointer-events:none;
+              padding:4px 8px; font-size:12px; line-height:18px; white-space:nowrap;
+              color:var(--label-primary); background:#43454a;
+              border:1px solid var(--border-l2); border-radius:var(--radius-sm);
+              transition:opacity var(--dur) var(--ease); }
+
+  /* ---- TODO ---- */
+  #todoView { padding:20px 0 48px; }
+  .todoBar { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+             margin-bottom:10px; }
+  #todoText { flex:1 1 260px; min-width:180px; }
+  #todoTag { width:150px; }
+  .todoList { display:flex; flex-direction:column; gap:6px; }
+  .todoItem { display:flex; gap:10px; align-items:flex-start; padding:10px 12px;
+              background:var(--bg-layer-1); border:1px solid var(--border-l1);
+              border-radius:var(--radius-sm); }
+  .todoItem:hover { border-color:var(--border-l2); }
+  .todoItem.done .todoTitle { color:var(--label-caption); text-decoration:line-through; }
+  .todoItem input[type=checkbox] { width:16px; height:16px; margin-top:3px;
+                                   flex:0 0 auto; accent-color:var(--accent); }
+  .todoBody { flex:1 1 auto; min-width:0; }
+  .todoTitle { color:var(--label-primary); word-break:break-all; }
+  .todoTitle a { color:var(--accent); }
+  .todoMeta { font-size:12px; line-height:18px; color:var(--label-caption);
+              margin-top:2px; }
+  .todoTag { display:inline-block; padding:0 8px; margin-right:6px; height:18px;
+             line-height:18px; font-size:11px; border-radius:9px;
+             background:var(--bg-layer-3); color:var(--label-secondary); }
+  .todoItem .ctl { display:flex; gap:4px; flex:0 0 auto; }
+  .todoItem .ctl button { height:24px; padding:0 9px; font-size:12px;
+                          border-radius:12px; }
+  .todoEmpty { padding:44px 12px; text-align:center; color:var(--label-caption); }
+  .todoEdit { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  .todoEdit input { height:28px; }
+  .todoEdit input.eText { flex:1 1 200px; }
+  .todoEdit input.eTag { width:120px; }
+  .todoEdit button { height:28px; padding:0 10px; font-size:12px; }
+  /* TODO 按钮独立成一列，才能整整齐齐排成一条竖线 */
+  td.todo { text-align:center; padding-left:4px; padding-right:8px; }
+  td.todo button.todoAdd { height:28px; min-width:26px; padding:0 8px; font-size:15px;
+                           line-height:1; border-radius:14px; }
+  td.br button.todoAdd.on { color:var(--accent); border-color:var(--accent); }
+
+  /* 窄屏：收紧留白，并让固定列让出空间 */
+  @media (max-width: 860px) {
+    :root { --pad: 12px; }
+    h1, td, td.br, td.time { font-size:13px; }
+    th, td { padding:8px 8px; }
+    th:nth-child(1), td:nth-child(1) { width:104px !important; }
+    th:nth-child(2), td:nth-child(2) { width:84px !important; }
+    th:nth-child(4), td:nth-child(4) { width:78px !important; }
+    h1 { flex-direction:column; align-items:flex-start; }
+    h1 .seg { margin-left:0; }
+  }
+</style>
+</head>
+<body>
+<header>
+ <div class="wrap">
+  <h1>浏览历史归档 <span class="count" id="total"></span>
+    <span class="seg" id="viewToggle">
+      <button type="button" data-view="list" class="on">列表</button>
+      <button type="button" data-view="cloud">词云</button>
+      <button type="button" data-view="todo">TODO <span id="todoBadge"></span></button>
+    </span>
+  </h1>
+
+  <div class="row">
+    <input id="q" placeholder="搜索 URL 或标题…" autocomplete="off" spellcheck="false">
+    <button id="reToggle" class="toggle" type="button"
+            title="开启正则表达式搜索（点一下切换）">.*</button>
+    <select id="browser"><option value="">全部浏览器</option></select>
+    <select id="time" title="按时间筛选">
+      <optgroup label="快捷范围">
+        <option value="all">全部时间</option>
+        <option value="today">今天</option>
+        <option value="yesterday">昨天</option>
+        <option value="7">最近 7 天</option>
+        <option value="30">最近 30 天</option>
+        <option value="365">最近一年</option>
+      </optgroup>
+      <optgroup label="指定时间">
+        <option value="day">指定某一天…</option>
+        <option value="custom">自定义范围…</option>
+      </optgroup>
+    </select>
+    <button id="clear">清空筛选</button>
+    <span class="seg" id="refreshSeg" style="margin-left:auto">
+      <label class="hint" style="display:flex;align-items:center;gap:5px;padding-left:4px">
+        <input type="checkbox" id="refreshSync" style="width:14px;height:14px">
+        先同步
+      </label>
+      <button id="refreshBtn" type="button" title="重新从归档库读取">刷新</button>
+    </span>
+  </div>
+
+  <div class="err" id="err" hidden></div>
+
+  <div class="row cond" id="condRow" hidden>
+    <span class="condLabel" id="condLabel"></span>
+    <span id="dayBox" hidden>
+      <input type="date" id="day" aria-label="选择日期">
+    </span>
+    <span id="rangeBox" hidden class="row">
+      <input type="date" id="from" aria-label="起始日期">
+      <span class="hint">至</span>
+      <input type="date" id="to" aria-label="结束日期">
+      <button id="fillAll" type="button">填满全部范围</button>
+    </span>
+    <span class="hint" id="condHint"></span>
+  </div>
+
+  <div class="chips" id="chips"></div>
+  <div class="stat" id="stat"></div>
+ </div>
+</header>
+<main class="wrap">
+ <section id="listView">
+  <table>
+    <thead><tr>
+      <th style="width:148px">时间</th><th style="width:116px">浏览器</th>
+      <th>标题 / 链接</th><th style="width:104px">类型</th><th style="width:52px"></th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <button id="more" style="display:none">加载更多</button>
+ </section>
+
+ <section id="cloudView" hidden>
+  <div class="cloudBar">
+    <span class="seg" id="srcToggle">
+      <button type="button" data-src="title" class="on">标题</button>
+      <button type="button" data-src="host">站点</button>
+      <button type="button" data-src="both">两者</button>
+    </span>
+    <select id="cloudTop" title="显示多少个词">
+      <option value="50">前 50 个词</option>
+      <option value="100">前 100 个词</option>
+      <option value="200" selected>前 200 个词</option>
+      <option value="400">前 400 个词</option>
+    </select>
+    <button id="cloudRedraw" type="button">重新摆放</button>
+    <span class="hint" id="cloudHint"></span>
+  </div>
+  <div id="cloudWrap">
+    <canvas id="cloud"></canvas>
+    <div id="cloudTip"></div>
+  </div>
+ </section>
+
+ <section id="todoView" hidden>
+  <div class="todoBar">
+    <input id="todoText" placeholder="写一条 TODO，回车添加…" autocomplete="off">
+    <input id="todoTag" placeholder="标签（可选）" list="todoTagList" autocomplete="off">
+    <datalist id="todoTagList"></datalist>
+    <button id="todoAddBtn" type="button">添加</button>
+  </div>
+  <div class="todoBar">
+    <span class="seg" id="todoFilter">
+      <button type="button" data-filter="open" class="on">未完成</button>
+      <button type="button" data-filter="all">全部</button>
+      <button type="button" data-filter="done">已完成</button>
+    </span>
+    <button id="todoExport" type="button">导出 JSON</button>
+    <button id="todoImport" type="button">导入 JSON</button>
+    <input type="file" id="todoFile" accept=".json,application/json" hidden>
+    <button id="todoClearDone" type="button">清空已完成</button>
+    <span class="hint" id="todoStat"></span>
+  </div>
+  <div class="err" id="todoWarn" hidden></div>
+  <div class="todoList" id="todoList"></div>
+ </section>
+</main>
+<script>
+// server 模式：数据由 boot() 从 /api/rows 拉，TODO 走 /api/todos 写进归档库。
+// static 模式：__DATA__ 在生成时被替换成完整数组，页面自包含、只读、离线可看。
+const MODE = "__MODE__";
+const EMBEDDED = __DATA__;
+const TOKEN = new URLSearchParams(location.search).get('t') || '';
+let DATA = [];
+let PAGE = 400;
+
+// 统一的接口调用：带上令牌，出错就抛出可读的原因
+async function api(path, body){
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { 'Content-Type': 'application/json', 'X-Token': TOKEN }
+                  : { 'X-Token': TOKEN },
+    body: body ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin',
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (!res.ok || !data || data.ok === false) {
+    throw new Error((data && data.error) || ('HTTP ' + res.status));
+  }
+  return data;
+}
+
+const tbody   = document.getElementById('tbody');
+const statEl  = document.getElementById('stat');
+const totalEl = document.getElementById('total');
+const moreBtn = document.getElementById('more');
+const qEl     = document.getElementById('q');
+const brEl    = document.getElementById('browser');
+const timeEl  = document.getElementById('time');
+const dayEl   = document.getElementById('day');
+const fromEl  = document.getElementById('from');
+const toEl    = document.getElementById('to');
+const clearEl = document.getElementById('clear');
+const reToggle = document.getElementById('reToggle');
+const errEl    = document.getElementById('err');
+const viewToggle = document.getElementById('viewToggle');
+const listView   = document.getElementById('listView');
+const cloudView  = document.getElementById('cloudView');
+const srcToggle  = document.getElementById('srcToggle');
+const cloudTop   = document.getElementById('cloudTop');
+const cloudRedraw = document.getElementById('cloudRedraw');
+const cloudHint  = document.getElementById('cloudHint');
+const cloudWrap  = document.getElementById('cloudWrap');
+const cloud      = document.getElementById('cloud');
+const cloudTip   = document.getElementById('cloudTip');
+const todoView   = document.getElementById('todoView');
+const todoBadge  = document.getElementById('todoBadge');
+const todoText   = document.getElementById('todoText');
+const todoTag    = document.getElementById('todoTag');
+const todoTagList = document.getElementById('todoTagList');
+const todoAddBtn = document.getElementById('todoAddBtn');
+const todoFilterEl = document.getElementById('todoFilter');
+const todoList   = document.getElementById('todoList');
+const todoStat   = document.getElementById('todoStat');
+const todoWarn   = document.getElementById('todoWarn');
+const todoExport = document.getElementById('todoExport');
+const todoImport = document.getElementById('todoImport');
+const todoFile   = document.getElementById('todoFile');
+const todoClearDone = document.getElementById('todoClearDone');
+const refreshBtn = document.getElementById('refreshBtn');
+const refreshSync = document.getElementById('refreshSync');
+const condRow = document.getElementById('condRow');
+const condLabel = document.getElementById('condLabel');
+const condHint  = document.getElementById('condHint');
+const dayBox    = document.getElementById('dayBox');
+const rangeBox  = document.getElementById('rangeBox');
+const fillAll   = document.getElementById('fillAll');
+const chipsEl   = document.getElementById('chips');
+
+// 当前筛选条件，UI 永远从这里读、往这里写
+const state = { q:'', browser:'', time:'all', day:'', from:'', to:'', useRegex:false,
+                view:'list', cloudSource:'title', cloudTop:200,
+                // 初始相位每次打开页面都随机：否则布局写死成同一个，看几次就腻。
+                // 同一次会话里相位不变，所以切筛选、搜关键词时词云不会重排。
+                cloudPhase: Math.random() * Math.PI * 2,
+                todoFilter:'open', todoTag:'' };
+let filtered = [], shown = 0, currentMatcher = null;
+let DAY_MIN = '', DAY_MAX = '';
+
+// ==========================================================================
+// 纯筛选逻辑（不碰 DOM，方便单独测试）
+// ==========================================================================
+/* __FILTER_LOGIC_START__ */
+function pad2(n){ return n < 10 ? '0' + n : '' + n; }
+
+// 本地日期字符串。注意不能用 toISOString()，那是 UTC，
+// 东八区凌晨 0-8 点会算成前一天。
+function dayStr(d){
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+function shiftDay(base, delta){
+  const d = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  d.setDate(d.getDate() + delta);
+  return d;
+}
+
+// 把「时间模式」翻译成一个闭区间的日期窗口；空串表示这一端不限制
+function timeWindow(state, today){
+  const t = today || new Date();
+  switch (state.time) {
+    case 'today':     return { from: dayStr(t), to: dayStr(t), label: '今天 ' + dayStr(t) };
+    case 'yesterday': { const y = shiftDay(t, -1);
+                        return { from: dayStr(y), to: dayStr(y), label: '昨天 ' + dayStr(y) }; }
+    case '7':         return { from: dayStr(shiftDay(t, -6)),  to: dayStr(t), label: '最近 7 天' };
+    case '30':        return { from: dayStr(shiftDay(t, -29)), to: dayStr(t), label: '最近 30 天' };
+    case '365':       return { from: dayStr(shiftDay(t, -364)), to: dayStr(t), label: '最近一年' };
+    case 'day':       return { from: state.day, to: state.day,
+                               label: state.day ? ('仅 ' + state.day) : '未选择日期' };
+    case 'custom':    return { from: state.from, to: state.to,
+                               label: rangeLabel(state.from, state.to) };
+    default:          return { from: '', to: '', label: '' };
+  }
+}
+function rangeLabel(from, to){
+  if (from && to) return from === to ? ('仅 ' + from) : (from + ' ~ ' + to);
+  if (from) return from + ' 之后（含当天）';
+  if (to)   return to + ' 之前（含当天）';
+  return '未设置范围';
+}
+
+// row: [local, utc, browser, profile, title, url, host, transition, ms, typed, day, dup]
+function matchesFilters(row, state, today, matcher){
+  if (state.browser && row[2] !== state.browser) return false;
+  const w = timeWindow(state, today);
+  if (w.from && row[10] < w.from) return false;
+  if (w.to   && row[10] > w.to)   return false;
+  if (matcher === undefined) matcher = buildMatcher(parseQuery(state.q, state.useRegex));
+  if (!matcher.ok) return false;
+  if (matcher.empty) return true;
+  return matcher.test(row[5] + ' ' + (row[4] || ''));
+}
+
+// --- 搜索词解析：普通模式 / 正则模式 ------------------------------------
+// 正则模式支持 /pattern/flags 写法。
+//   bare 写法（如 deepseek|openai）  -> 自动补 i，忽略大小写
+//   /pattern/ 写法                  -> 同样补 i
+//   /pattern/gm 写法                -> 完全按你写的 flags 来（这样才有办法区分大小写）
+function parseQuery(raw, useRegex){
+  raw = raw || '';
+  if (!useRegex) {
+    return { mode: 'plain', text: raw, flags: '', error: '' };
+  }
+  let body = raw.trim();
+  let flags = 'i';
+  const m = /^\/(.*)\/([gimsuy]*)$/.exec(body);
+  if (m) {
+    body = m[1];
+    flags = m[2] === '' ? 'i' : m[2];
+  }
+  return { mode: 'regex', text: body, flags: flags, error: '' };
+}
+
+function escapeRegExp(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+// 编译成匹配器。ok=false 表示正则写错了，error 是给用户看的原因。
+function buildMatcher(query){
+  if (query.mode === 'plain') {
+    const needle = query.text.toLowerCase();
+    if (!needle) return { ok:true, empty:true, error:'' };
+    return { ok:true, empty:false, error:'',
+             highlight: new RegExp(escapeRegExp(query.text), 'gi'),
+             test: s => (s || '').toLowerCase().indexOf(needle) >= 0 };
+  }
+  if (!query.text) return { ok:true, empty:true, error:'' };
+
+  // 关键：test() 用的正则必须去掉 g / y，否则 lastIndex 会在多次调用之间累积，
+  // 同一个字符串反复 test 会时而 true 时而 false。
+  const testFlags = query.flags.replace(/[gy]/g, '');
+  let re;
+  try {
+    re = new RegExp(query.text, testFlags);
+  } catch (e) {
+    return { ok:false, empty:false, error:(e && e.message) ? e.message : String(e),
+             test: () => false };
+  }
+  let hl;
+  try {
+    hl = new RegExp(query.text, testFlags.indexOf('g') < 0 ? testFlags + 'g' : testFlags);
+  } catch (e) {
+    hl = null;
+  }
+  return { ok:true, empty:false, error:'', regex:re, highlight:hl, test: s => re.test(s || '') };
+}
+
+// 把一段文字切成「命中 / 未命中」的片段，交给界面做高亮。纯函数，方便测试。
+function splitMatches(text, matcher){
+  text = text || '';
+  if (!matcher || matcher.empty || !matcher.ok || !matcher.highlight) {
+    return text ? [{ text: text, hit: false }] : [];
+  }
+  // 普通模式的高亮也要先转义，否则搜 “a.b” 会把 “axb” 也点亮
+  const re = matcher.highlight;
+  re.lastIndex = 0;
+  const out = [];
+  let last = 0, m, guard = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (++guard > 200) break;                       // 防御病态正则卡死页面
+    if (m.index > last) out.push({ text: text.slice(last, m.index), hit: false });
+    if (m[0]) out.push({ text: m[0], hit: true });
+    last = m.index + m[0].length;
+    if (!m[0]) re.lastIndex++;                      // 空匹配必须手动前进，否则死循环
+    if (re.lastIndex > text.length) break;
+  }
+  if (last < text.length) out.push({ text: text.slice(last), hit: false });
+  return out;
+}
+// ==========================================================================
+// 词云：分词、统计、排布（纯函数，可单独测试）
+// ==========================================================================
+/* __WORDCLOUD_LOGIC_START__ */
+// 中文没有空格，纯标准库做不到词性标注，这里用「n-gram + 频次挑选」：
+// 先统计 2/3/4 元组的出现次数，再在每个汉字串里从左往右贪心取
+// 「够高频的最长片段」。高频短语（如「部落冲突」）会被整体取出，
+// 低频的碎片则被丢弃——这正是词云想要的效果。
+const STOPWORDS = new Set([
+  // 英文
+  'the','and','for','from','with','that','this','you','your','are','was','were',
+  'have','has','had','not','but','all','can','will','would','there','their','what',
+  'when','where','which','who','how','why','his','her','its','our','out','one',
+  'two','new','get','got','use','used','using','via','com','www','http','https',
+  'html','index','page','home','login','sign','search','google','about','more',
+  'cc','tv','xyz','info','net','org','edu','gov','io','cn','app','dev','site',
+  'user','view','list','item','post','news','main','null','undefined','true','false',
+  // 中文（单字与高频虚词，出现即无信息量）
+  '的','了','和','是','在','我','有','就','不','人','都','一','上','也','很',
+  '到','说','要','去','你','会','着','没','看','好','自','己','这','那','他',
+  '她','它','们','个','之','与','及','或','而','但','被','把','让','从','对',
+  '向','于','为','以','所','能','可','该','此','其','中','等','各','又','再',
+  '才','只','更','最','呢','吗','啊','吧','呀','是','地','得','过','下','来',
+  '我们','他们','你们','这个','那个','什么','怎么','可以','一个','就是','不是',
+  '没有','自己','现在','已经','但是','因为','所以','如果','还是','这么','那么',
+  '之后','之前','时候','一些','一样','大家','需要','使用','进行','通过','关于',
+  '以及','或者','并且','而且','然后','只是','还有','全部','所有','每个','各种',
+  '一下','一直','一起','开始','结束','更多','相关','内容','页面','网站','首页',
+]);
+
+const CJK_CLASS = '[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff]';
+const CJK_RUN_RE = new RegExp(CJK_CLASS + '+', 'g');
+
+// 去掉链接、把各种分隔符与全角标点换成空格、折叠空白，再转小写
+function cleanText(s){
+  return (s || '')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/[\u2000-\u206f\u3001-\u303f\uff01-\uff5e|丨·—–_/\\>»«[\](){}<>《》，。！？、；：,.!?;:"'`~@#$%^&*+=]+/g, ' ')
+    .replace(/[\u3000\s]+/g, ' ')      // 必须在标点替换之后，否则会留下连续空格
+    .trim()
+    .toLowerCase();
+}
+
+// 英文与数字词：至少以两个字母开头（挡掉 v3、x2 这类碎片），纯数字和停用词丢掉
+function latinWords(text){
+  const out = [];
+  const re = /[a-z]{2}[a-z0-9]*/g;
+  const lower = String(text || '').toLowerCase();
+  let m;
+  while ((m = re.exec(lower)) !== null) {
+    if (!STOPWORDS.has(m[0])) out.push(m[0]);
+  }
+  return out;
+}
+
+function cjkRuns(text){
+  return text.match(CJK_RUN_RE) || [];
+}
+
+// 只去掉词尾的真虚词字：「看攻略的」->「看攻略」。
+// 注意别拿整张停用词表来削——「好帮手」的「好」、「下载游戏」的「下」都是实词的一部分。
+const CJK_PARTICLES = new Set(['的','了','着','呢','吗','吧','啊','呀','哦','嗯',
+                               '嘛','啦','咯','哇','喔','噢']);
+function trimParticles(term){
+  let s = term;
+  while (s.length > 2 && CJK_PARTICLES.has(s[s.length - 1])) s = s.slice(0, -1);
+  return s;
+}
+
+// 整个词都是停用字（例如「的我」「了他」）就丢掉
+function isNoiseTerm(term){
+  if (STOPWORDS.has(term)) return true;
+  if (term.length < 2) return true;
+  let stop = 0;
+  for (const ch of term) if (STOPWORDS.has(ch)) stop++;
+  return stop === term.length;
+}
+
+// 站点名：www.bilibili.com -> bilibili，i.njupt.edu.cn -> njupt
+const HOST_PREFIX = new Set(['www','m','i','space','search','api','static','cdn',
+  'img','v','t','bbs','blog','new','beta','docs','wiki','en','cn','mail','web',
+  'passport','account','login','shop','pan','live','www2']);
+const SECOND_LEVEL = new Set(['com','net','org','edu','gov','co','ac','gob','mil',
+  'or','ne','go','info','biz','tv','cc']);
+
+function hostTerm(host){
+  if (!host) return '';
+  const h = String(host).toLowerCase();
+  if (/^[\d.]+$/.test(h)) return '';          // 纯 IP 没有站点名可言
+  const parts = h.split('.').filter(Boolean);
+  if (parts.length < 2) return parts[0] || '';
+  let mid = parts.slice(0, -1);
+  while (mid.length > 1 && HOST_PREFIX.has(mid[0])) mid = mid.slice(1);
+  let name = mid[mid.length - 1] || '';
+  if (SECOND_LEVEL.has(name) && mid.length > 1) name = mid[mid.length - 2];
+  return name.replace(/[^a-z0-9-]/g, '');
+}
+
+// 主入口：把若干行记录聚合成 {词 -> 次数}
+// source: 'title' | 'host' | 'both'
+function extractTerms(rows, source, minCount){
+  const count = new Map();
+  const bump = (k, w) => { if (k) count.set(k, (count.get(k) || 0) + w); };
+  const runs = [];            // 汉字串，稍后统一做 n-gram 挑选
+
+  for (const r of rows) {
+    const w = Math.max(1, r[11] || 1);      // 按实际访问次数加权
+    if (source === 'host' || source === 'both') bump(hostTerm(r[6]), w);
+    if (source === 'host') continue;
+
+    const text = cleanText(r[4] || '');
+    for (const word of latinWords(text)) bump(word, w);
+    for (const run of cjkRuns(text)) runs.push([run, w]);
+  }
+
+  if (source !== 'host') {
+    const need = minCount === undefined ? 3 : minCount;
+    const grams = [new Map(), new Map(), new Map()];   // 2 / 3 / 4 元组
+    for (const [run, w] of runs) {
+      for (let n = 2; n <= 4; n++) {
+        for (let i = 0; i + n <= run.length; i++) {
+          const g = run.substr(i, n);
+          grams[n - 2].set(g, (grams[n - 2].get(g) || 0) + w);
+        }
+      }
+    }
+    for (const [run, w] of runs) {
+      let i = 0;
+      while (i < run.length) {
+        let taken = 0;
+        for (let n = 4; n >= 2; n--) {                 // 优先取最长的
+          if (i + n > run.length) continue;
+          const g = run.substr(i, n);
+          if ((grams[n - 2].get(g) || 0) >= need) { bump(trimParticles(g), w); taken = n; break; }
+        }
+        i += taken || 1;                                // 都不够高频就跳过这个字
+      }
+    }
+  }
+
+  for (const k of [...count.keys()]) if (isNoiseTerm(k)) count.delete(k);
+  return count;
+}
+
+// 把 {词:次数} 排序并截断
+function topTerms(counts, limit){
+  const arr = [];
+  for (const [text, n] of counts) arr.push({ text: text, count: n });
+  arr.sort((a, b) => b.count - a.count || (a.text < b.text ? -1 : 1));
+  return limit ? arr.slice(0, limit) : arr;
+}
+
+// 可复现的伪随机数：同一个词、同一轮重排，结果稳定
+function seededRandom(seed){
+  let s = seed >>> 0;
+  return function(){
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// 均匀网格索引：把已放置的包围盒按格子分桶，碰撞检测只查相邻格子。
+// 没有它的话，几百个词时每个候选点都要跟所有已放置的词比一遍，会卡到不能用。
+function makeGrid(width, height, cell){
+  const cols = Math.max(1, Math.ceil(width / cell) + 1);
+  const rows = Math.max(1, Math.ceil(height / cell) + 1);
+  const buckets = new Map();
+  const clampCell = (v, max) => Math.max(0, Math.min(max - 1, Math.floor(v / cell)));
+  const spans = (box) => ({
+    c0: clampCell(box.x0, cols), c1: clampCell(box.x1, cols),
+    r0: clampCell(box.y0, rows), r1: clampCell(box.y1, rows),
+  });
+  return {
+    insert(box){
+      const s = spans(box);
+      for (let r = s.r0; r <= s.r1; r++) {
+        for (let c = s.c0; c <= s.c1; c++) {
+          const k = r * cols + c;
+          const arr = buckets.get(k);
+          if (arr) arr.push(box); else buckets.set(k, [box]);
+        }
+      }
+    },
+    hits(box){
+      const s = spans(box);
+      for (let r = s.r0; r <= s.r1; r++) {
+        for (let c = s.c0; c <= s.c1; c++) {
+          const arr = buckets.get(r * cols + c);
+          if (!arr) continue;
+          for (let i = 0; i < arr.length; i++) {
+            const b = arr[i];
+            if (box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0) {
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    },
+  };
+}
+
+// 词云排布：先沿螺线从中心向外找空位（大字自然居中），
+// 螺线找不到的再随机撒点补位（把边缘的空隙填密）。
+// measure(text, size) 由调用方注入，所以这个函数不依赖 canvas，可以单独测。
+function layoutCloud(terms, opts){
+  const o = Object.assign({
+    width: 1000, height: 520, minSize: 11, maxSize: 96,
+    // 大词小词用同一套间距规则：字号差 9 倍时，统一规则看上去才是一致的
+    padding: 3, lineFactor: 1.2,
+    maxWords: 100, measure: (t, s) => t.length * s * 0.62,
+    phase: 0, cell: 36,
+    spiralSteps: 2600, spiralDr: 1.5, spiralDa: 0.32,
+    fallbackTries: 2000, fallback: true,
+    jitter: true, jitterRange: 8, jitterTries: 12,
+  }, opts || {});
+
+  const placed = [];
+  if (!terms.length || o.width <= 0 || o.height <= 0) return placed;
+
+  const list = terms.slice(0, o.maxWords);
+  const maxC = Math.max(1, list[0].count);
+  const minC = Math.max(1, list[list.length - 1].count);
+  // 字号映射：按频次的比值做幂律缩放。
+  // 指数 0.5（也就是开方）会把中频词抬得很高、压缩差距；
+  // 指数 1（线性）又会让长尾全挤到最小号。0.75 是比较均衡的强对比档。
+  const power = o.power === undefined ? 0.75 : o.power;
+  const base = Math.pow(Math.min(1, minC / maxC), power);
+  const denom = 1 - base;
+
+  const grid = makeGrid(o.width, o.height, o.cell);
+  const cx = o.width / 2, cy = o.height / 2;
+
+  for (let idx = 0; idx < list.length; idx++) {
+    const term = list[idx];
+    const r = Math.pow(Math.min(1, term.count / maxC), power);
+    const t = denom > 0 ? (r - base) / denom : 1;
+    const size = Math.round(o.minSize + t * (o.maxSize - o.minSize));
+    const textW = Math.max(1, o.measure(term.text, size));
+    const textH = size * o.lineFactor;
+    const pad = o.padding;
+
+    // 每个词一个独立的随机流（种子含 idx 和 phase）：
+    // 起点方向不同，词就不会一圈一圈地整齐排在同一半径上，
+    // 同时保证「同一个 phase 下结果可复现」。
+    const rnd = seededRandom(
+      (0x9e3779b9 ^ Math.imul(idx + 1, 2654435761) ^ Math.round(o.phase * 1e6)) >>> 0);
+    const startAngle = o.randomStart === false ? o.phase
+                                                : o.phase + rnd() * Math.PI * 2;
+
+    // 所有词一律横排：竖排的字读起来费劲，这里不做
+    const boxAt = (x, y) => {
+      const box = { x0: x - textW / 2 - pad, y0: y - textH / 2 - pad,
+                    x1: x + textW / 2 + pad, y1: y + textH / 2 + pad };
+      if (box.x0 < 0 || box.y0 < 0 || box.x1 > o.width || box.y1 > o.height) return null;
+      return grid.hits(box) ? null : box;
+    };
+
+    let hit = null;
+    for (let step = 0; step < o.spiralSteps && !hit; step++) {
+      // 半径只由步数决定，起始角只改变方向，不改变从中心出发这件事
+      const ang = startAngle + step * o.spiralDa;
+      const rr = o.spiralDr * o.spiralDa * step;
+      const x = cx + rr * Math.cos(ang);
+      const y = cy + rr * Math.sin(ang) * 0.62;     // 竖向压扁，贴合宽扁的画布
+      const box = boxAt(x, y);
+      if (box) hit = { text: term.text, count: term.count, size: size,
+                       x: x, y: y, box: box, rank: idx };
+    }
+
+    // 螺线在大半径处的采样点间距会拉开到上百像素，边缘的小空隙全靠这一步填。
+    // tries 调小一点，免得外围被塞得过满。
+    if (!hit && o.fallback) {
+      for (let k = 0; k < o.fallbackTries && !hit; k++) {
+        const x = o.width * rnd();
+        const y = o.height * rnd();
+        const box = boxAt(x, y);
+        if (box) hit = { text: term.text, count: term.count, size: size,
+                         x: x, y: y, box: box, rank: idx };
+      }
+    }
+
+    // 落位后在附近抖一抖，并挑「四周还能再往外扩最多」的那个位置。
+    // 不加这一步的话，词会紧贴着螺旋线排，整片看起来是一圈一圈的。
+    if (hit && o.jitter !== false) {
+      const range = o.jitterRange || 8;
+      let best = hit, bestSlack = -1;
+      for (let k = 0; k < (o.jitterTries || 12); k++) {
+        const jx = hit.x + (rnd() * 2 - 1) * range;
+        const jy = hit.y + (rnd() * 2 - 1) * range;
+        const box = boxAt(jx, jy);
+        if (!box) continue;
+        let slack = 0;
+        for (let e = 1; e <= 4; e++) {
+          if (grid.hits({ x0: box.x0 - e, y0: box.y0 - e, x1: box.x1 + e, y1: box.y1 + e })) break;
+          slack = e;
+        }
+        // 用 >=：扩容量打平时取后一个候选，否则绝大多数候选都是 0，
+        // 位置永远不会动，抖动就形同虚设。
+        if (slack >= bestSlack) {
+          bestSlack = slack;
+          best = { text: term.text, count: term.count, size: size,
+                   x: jx, y: jy, box: box, rank: idx };
+        }
+      }
+      hit = best;
+    }
+
+    if (hit) { placed.push(hit); grid.insert(hit.box); }
+  }
+  return placed;
+}
+
+// 按排名给颜色，从强调蓝过渡到次级灰（都取自 DSH 令牌）
+function cloudColor(rank, total){
+  const p = total > 1 ? rank / (total - 1) : 0;
+  if (p < 0.06) return '#4d93f8';
+  if (p < 0.18) return '#679efe';
+  if (p < 0.42) return '#cfd3d6';
+  if (p < 0.70) return '#adb2b8';
+  return '#81858c';
+}
+/* __WORDCLOUD_LOGIC_END__ */
+
+// ==========================================================================
+// TODO：纯逻辑（不碰 DOM、不碰网络，可以单独测）
+// ==========================================================================
+/* __TODO_LOGIC_START__ */
+// 注意职责划分：**增删改由服务端负责**（Python 里那份才是权威实现），
+// 前端这里只保留「怎么显示」和「导入导出格式」两件事，
+// 避免同一套规则在两边各写一遍、日后改歪。
+function todoCounts(items){
+  const list = items || [];
+  let done = 0;
+  for (const t of list) if (t.done) done++;
+  return { total: list.length, done: done, open: list.length - done };
+}
+
+// 未完成在前；同组内按创建时间倒序（新建的在上面）
+function todoSort(items){
+  return (items || []).slice().sort((a, b) => {
+    if (!!a.done !== !!b.done) return a.done ? 1 : -1;
+    return String(b.created).localeCompare(String(a.created));
+  });
+}
+
+function todoFilter(items, mode){
+  const list = todoSort(items);
+  if (mode === 'open') return list.filter(t => !t.done);
+  if (mode === 'done') return list.filter(t => t.done);
+  return list;
+}
+
+// 标签集合，按出现次数排序，供输入框做提示
+function todoTags(items){
+  const n = new Map();
+  for (const t of (items || [])) {
+    if (t.tag) n.set(t.tag, (n.get(t.tag) || 0) + 1);
+  }
+  return [...n.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+                         .map(e => e[0]);
+}
+
+function todoToJSON(items){
+  return JSON.stringify({ version: 1, exported: new Date().toISOString(),
+                          items: todoSort(items || []) }, null, 2);
+}
+
+// 导入前先在前端过一遍：格式不对不算崩，能救回多少算多少，并如实报告丢了几条
+function todoFromJSON(text){
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, items: [], skipped: 0, error: '不是合法的 JSON：' + e.message };
+  }
+  const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : null);
+  if (!arr) return { ok: false, items: [], skipped: 0,
+                     error: '结构不对：需要 {items:[...]} 或一个数组' };
+
+  const items = [];
+  let skipped = 0;
+  for (const it of arr) {
+    if (!it || typeof it !== 'object') { skipped++; continue; }
+    const kind = it.kind === 'url' ? 'url' : 'text';
+    const text = String(it.text || '').trim();
+    const url = String(it.url || '');
+    if (kind === 'url' ? !url : !text) { skipped++; continue; }
+    items.push({
+      id: String(it.id || ''),
+      kind: kind,
+      text: text,
+      url: url,
+      title: String(it.title || ''),
+      tag: String(it.tag || '').trim(),
+      done: !!it.done,
+      created: String(it.created || ''),
+      doneAt: it.doneAt || null,
+    });
+  }
+  return { ok: true, items: items, skipped: skipped, error: '' };
+}
+/* __TODO_LOGIC_END__ */
+
+/* __FILTER_LOGIC_END__ */
+// ==========================================================================
+// 界面
+// ==========================================================================
+// 数据到位之后再跑一次界面初始化（server 模式下要等 fetch 回来）
+function initUI(){
+  // 浏览器下拉（重复调用时先清掉旧的）
+  while (brEl.options.length > 1) brEl.remove(1);
+  const set = [...new Set(DATA.map(r => r[2]))].sort();
+  for (const b of set) {
+    const o = document.createElement('option');
+    o.value = b; o.textContent = b; brEl.appendChild(o);
+  }
+  // 日期输入框限制在归档实际覆盖的范围内，省得选到没数据的日子
+  DAY_MIN = DATA.reduce((m, r) => (r[10] && r[10] < m ? r[10] : m), '9999-99-99');
+  DAY_MAX = DATA.reduce((m, r) => (r[10] && r[10] > m ? r[10] : m), '0000-00-00');
+  for (const el of [dayEl, fromEl, toEl]) {
+    el.min = DAY_MIN; el.max = DAY_MAX;
+  }
+  dayEl.value = DAY_MAX;   // 默认落在最近有记录的一天
+  fromEl.value = DAY_MIN;
+  toEl.value = DAY_MAX;
+  totalEl.textContent = '共 ' + DATA.length.toLocaleString() + ' 条 · 数据范围 ' +
+                        DAY_MIN + ' ~ ' + DAY_MAX;
+}
+
+// 根据当前时间模式，显示对应的输入框，并给出说明文字
+function syncTimeControls(){
+  const isDay = state.time === 'day';
+  const isCustom = state.time === 'custom';
+  dayBox.hidden = !isDay;
+  rangeBox.hidden = !isCustom;
+  condRow.hidden = !(isDay || isCustom);
+
+  if (isDay) {
+    condLabel.textContent = '选定一天：';
+    condHint.textContent = '（只会显示这一天的记录，可直接键入日期）';
+  } else if (isCustom) {
+    condLabel.textContent = '时间范围：';
+    condHint.textContent = '（首尾两天都包含；只填一端表示这一端不限制）';
+  } else {
+    condLabel.textContent = '';
+    condHint.textContent = '';
+  }
+}
+
+// 已生效的条件做成可单独删除的标签
+function renderChips(){
+  chipsEl.innerHTML = '';
+  const add = (label, value, onClear) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.append(label + ' ');
+    const b = document.createElement('b');
+    b.textContent = value;
+    chip.appendChild(b);
+    const x = document.createElement('button');
+    x.type = 'button'; x.textContent = '×'; x.title = '移除这个条件';
+    x.onclick = onClear;
+    chip.appendChild(x);
+    chipsEl.appendChild(chip);
+  };
+
+  if (state.q) {
+    if (state.useRegex) {
+      const q = parseQuery(state.q, true);
+      add('正则', '/' + q.text + '/' + q.flags,
+          () => { state.q = ''; qEl.value = ''; update(); qEl.focus(); });
+    } else {
+      add('关键词', state.q, () => { state.q = ''; qEl.value = ''; update(); qEl.focus(); });
+    }
+  }
+  if (state.browser) add('浏览器', state.browser, () => { state.browser = ''; brEl.value = ''; update(); });
+
+  const w = timeWindow(state);
+  if (state.time !== 'all' && w.label) {
+    add('时间', w.label, () => {
+      state.time = 'all'; timeEl.value = 'all';
+      state.day = ''; state.from = DAY_MIN; state.to = DAY_MAX;
+      update();
+    });
+  }
+
+  if (chipsEl.children.length > 1) {
+    const all = document.createElement('button');
+    all.type = 'button'; all.textContent = '全部清除';
+    all.onclick = clearAll;
+    chipsEl.appendChild(all);
+  }
+}
+
+// 把命中的片段包成 <mark>。全程用 DOM 节点拼，不碰 innerHTML，避免注入风险。
+function setRich(el, text, matcher){
+  el.textContent = '';
+  for (const seg of splitMatches(text, matcher)) {
+    if (seg.hit) {
+      const m = document.createElement('mark');
+      m.textContent = seg.text;
+      el.appendChild(m);
+    } else if (seg.text) {
+      el.appendChild(document.createTextNode(seg.text));
+    }
+  }
+}
+
+function emptyRow(message){
+  const tr = document.createElement('tr');
+  const td = document.createElement('td');
+  td.className = 'empty';
+  td.colSpan = 5;
+  td.append(message || '没有符合这些条件的记录。');
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.textContent = '清空筛选，看全部';
+  btn.onclick = clearAll;
+  td.appendChild(btn);
+  tr.appendChild(td);
+  return tr;
+}
+
+function renderMore(){
+  const slice = filtered.slice(shown, shown + PAGE);
+  const frag = document.createDocumentFragment();
+  for (const r of slice) {
+    const tr = document.createElement('tr');
+    const tdT = document.createElement('td');
+    tdT.className = 'time'; tdT.textContent = r[0];
+
+    const tdB = document.createElement('td');
+    tdB.className = 'br'; tdB.textContent = r[3] ? (r[2] + ' / ' + r[3]) : r[2];
+
+    const tdU = document.createElement('td');
+    const a = document.createElement('a');
+    a.href = r[5]; a.target = '_blank'; a.rel = 'noreferrer noopener';
+    setRich(a, r[5], currentMatcher);
+    const div1 = document.createElement('div');
+    div1.className = 'title'; setRich(div1, r[4] || '(无标题)', currentMatcher);
+    const div2 = document.createElement('div');
+    div2.appendChild(a);
+    const div3 = document.createElement('div');
+    div3.className = 'host'; div3.textContent = r[6] || '';
+    tdU.append(div1, div2, div3);
+
+    const tdX = document.createElement('td');
+    tdX.className = 'br';
+    tdX.textContent = (r[7] || '') + (r[9] ? ' · 输入' : '') +
+                      (r[8] ? ' · ' + (r[8] / 1000).toFixed(1) + 's' : '') +
+                      (r[11] > 1 ? ' · ×' + r[11] : '');
+
+    // 单独一列放按钮：跟着文字排的话，按钮的横向位置会随前面的文字长短飘，
+    // 一整列看起来就参差不齐。
+    const tdTodo = document.createElement('td');
+    tdTodo.className = 'todo';
+    const todoBtn = document.createElement('button');
+    todoBtn.type = 'button';
+    todoBtn.className = 'todoAdd';
+    todoBtn.textContent = '＋';
+    todoBtn.title = '把这一行加进 TODO（标签用 TODO 页里填的那个）';
+    todoBtn.onclick = (ev) => { ev.stopPropagation(); addRowToTodo(r, todoBtn); };
+    tdTodo.appendChild(todoBtn);
+
+    tr.append(tdT, tdB, tdU, tdX, tdTodo);
+    frag.appendChild(tr);
+  }
+  tbody.appendChild(frag);
+  shown += slice.length;
+
+  const pct = DATA.length ? Math.round(filtered.length / DATA.length * 100) : 0;
+  statEl.textContent = '显示 ' + shown.toLocaleString() + ' / 命中 ' +
+                       filtered.length.toLocaleString() + ' 条' +
+                       (filtered.length === DATA.length ? '（全部）' : '（占全部 ' + pct + '%）');
+  moreBtn.style.display = shown < filtered.length ? 'block' : 'none';
+  moreBtn.textContent = '加载更多（还有 ' + (filtered.length - shown).toLocaleString() + ' 条）';
+}
+
+function update(){
+  syncTimeControls();
+
+  const query = parseQuery(state.q, state.useRegex);
+  currentMatcher = buildMatcher(query);
+
+  // 正则写错时明确报出来，并把筛选停掉，而不是悄悄返回空结果
+  const bad = !currentMatcher.ok;
+  errEl.hidden = !bad;
+  errEl.textContent = bad ? ('正则表达式无效：' + currentMatcher.error) : '';
+  qEl.classList.toggle('invalid', bad);
+
+  filtered = bad ? [] : DATA.filter(r => matchesFilters(r, state, undefined, currentMatcher));
+
+  tbody.innerHTML = '';
+  shown = 0;
+  if (!filtered.length) {
+    tbody.appendChild(bad
+      ? emptyRow('正则表达式无效，已停止筛选。改好表达式或关掉 .* 开关即可。')
+      : emptyRow());
+    statEl.textContent = '命中 0 条 / 归档共 ' + DATA.length.toLocaleString() + ' 条';
+    moreBtn.style.display = 'none';
+  } else {
+    renderMore();
+  }
+  renderChips();
+  syncHeaderHeight();   // 条件行/标签行会改变顶部栏高度，表头偏移要跟着更新
+  scheduleCloud();      // 词云视图下才会真正重算
+  if (state.view === 'todo') renderTodos();
+}
+
+function clearAll(){
+  state.q = ''; state.browser = ''; state.time = 'all';
+  state.day = ''; state.from = DAY_MIN; state.to = DAY_MAX; state.useRegex = false;
+  qEl.value = ''; brEl.value = ''; timeEl.value = 'all';
+  dayEl.value = DAY_MAX; fromEl.value = DAY_MIN; toEl.value = DAY_MAX;
+  reToggle.classList.remove('on');
+  qEl.placeholder = '搜索 URL 或标题…';
+  update();
+  qEl.focus();
+}
+
+function setRegexMode(on, refresh){
+  state.useRegex = on;
+  reToggle.classList.toggle('on', on);
+  reToggle.title = on ? '正在用正则表达式搜索（点一下切回普通搜索）'
+                      : '开启正则表达式搜索（点一下切换）';
+  qEl.placeholder = on
+    ? '正则搜索，例如 deepseek|openai\\.com ，或 /^https:\\/\\/github/i'
+    : '搜索 URL 或标题…';
+  if (refresh !== false) update();
+}
+
+function readStateFromUI(){
+  state.q = qEl.value.trim();
+  state.browser = brEl.value;
+  state.time = timeEl.value;
+  state.day = dayEl.value;
+  state.from = fromEl.value;
+  state.to = toEl.value;
+}
+
+qEl.addEventListener('input', () => { readStateFromUI(); update(); });
+brEl.addEventListener('change', () => { readStateFromUI(); update(); });
+timeEl.addEventListener('change', () => { readStateFromUI(); update(); });
+dayEl.addEventListener('change', () => { readStateFromUI(); update(); });
+fromEl.addEventListener('change', () => { readStateFromUI(); update(); });
+toEl.addEventListener('change', () => { readStateFromUI(); update(); });
+clearEl.addEventListener('click', clearAll);
+reToggle.addEventListener('click', () => setRegexMode(!state.useRegex));
+fillAll.addEventListener('click', () => {
+  fromEl.value = DAY_MIN; toEl.value = DAY_MAX;
+  readStateFromUI(); update();
+});
+// ==========================================================================
+// 词云：渲染层（依赖 canvas / DOM）
+// ==========================================================================
+const CLOUD_FONT = (getComputedStyle(document.documentElement)
+  .getPropertyValue('--font-sans') || 'sans-serif').trim() || 'sans-serif';
+const measureCtx = document.createElement('canvas').getContext('2d');
+let cloudItems = [];
+let cloudTimer = 0;
+
+function measureTerm(text, size){
+  measureCtx.font = '600 ' + size + 'px ' + CLOUD_FONT;
+  return measureCtx.measureText(text).width;
+}
+
+function renderCloud(){
+  cloudTimer = 0;
+  if (state.view !== 'cloud') return;
+
+  const cssW = Math.max(320, cloudWrap.clientWidth || 1000);
+  // 画布高度按 1.5 倍放大（0.46 -> 0.69），配合放大的字号差距
+  const cssH = Math.max(450, Math.min(930, Math.round(cssW * 0.69)));
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cloud.width = Math.round(cssW * dpr);
+  cloud.height = Math.round(cssH * dpr);
+  cloud.style.height = cssH + 'px';
+  const ctx = cloud.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  // 词多了就放宽 n-gram 的频次门槛，否则凑不满 400 个词
+  const counts = extractTerms(filtered, state.cloudSource,
+                              state.cloudTop >= 400 ? 2 : 3);
+  const terms = topTerms(counts, state.cloudTop);
+  cloudItems = layoutCloud(terms, {
+    width: cssW, height: cssH, measure: measureTerm,
+    // 大词小词同一套间距，字号差 9 倍时看上去才一致
+    padding: 3, lineFactor: 1.2,
+    // 字号跨度从 13~54 拉到 11~96，最大词与最小词差约 9 倍
+    minSize: 11, maxSize: Math.max(48, Math.min(96, Math.round(cssH / 8))),
+    power: 0.75, maxWords: state.cloudTop,
+    phase: state.cloudPhase,
+  });
+
+  const total = cloudItems.length;
+  for (const it of cloudItems) {
+    ctx.font = '600 ' + it.size + 'px ' + CLOUD_FONT;
+    ctx.fillStyle = cloudColor(it.rank, total);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(it.text, it.x, it.y);   // 一律横排，不做旋转
+  }
+
+  const dropped = terms.length - total;
+  cloudHint.textContent = '基于当前筛选的 ' + filtered.length.toLocaleString() +
+    ' 条记录，取出 ' + terms.length + ' 个词，放得下 ' + total + ' 个' +
+    (dropped > 0 ? '（' + dropped + ' 个太挤没排进去）' : '') +
+    '　·　点词语可回到列表并搜索它';
+}
+
+// 输入时防抖，避免每敲一个字就重算一遍分词
+function scheduleCloud(){
+  if (state.view !== 'cloud') return;
+  clearTimeout(cloudTimer);
+  cloudTimer = setTimeout(renderCloud, 90);
+}
+
+function cloudHitAt(clientX, clientY){
+  const rect = cloud.getBoundingClientRect();
+  const x = clientX - rect.left, y = clientY - rect.top;
+  for (const it of cloudItems) {
+    if (x >= it.box.x0 && x <= it.box.x1 && y >= it.box.y0 && y <= it.box.y1) {
+      return { item: it, x: x, y: y, rect: rect };
+    }
+  }
+  return null;
+}
+
+cloud.addEventListener('mousemove', (e) => {
+  const hit = cloudHitAt(e.clientX, e.clientY);
+  if (!hit) {
+    cloudTip.style.opacity = '0';
+    cloud.style.cursor = 'default';
+    return;
+  }
+  cloudTip.textContent = hit.item.text + ' · ' + hit.item.count + ' 次';
+  cloudTip.style.opacity = '1';
+  const tw = cloudTip.offsetWidth, th = cloudTip.offsetHeight;
+  cloudTip.style.left = Math.max(4, Math.min(hit.x + 12, hit.rect.width - tw - 4)) + 'px';
+  cloudTip.style.top = Math.max(4, hit.y - th - 8) + 'px';
+  cloud.style.cursor = 'pointer';
+});
+cloud.addEventListener('mouseleave', () => { cloudTip.style.opacity = '0'; });
+
+// 点词 -> 切回列表并按这个词搜索（顺手关掉正则，免得词里有特殊字符）
+cloud.addEventListener('click', (e) => {
+  const hit = cloudHitAt(e.clientX, e.clientY);
+  if (!hit) return;
+  setRegexMode(false, false);
+  qEl.value = hit.item.text;
+  state.q = hit.item.text;
+  setView('list');
+});
+
+// ==========================================================================
+// TODO：存储与渲染
+// ==========================================================================
+// TODO 存在归档库里，由服务端读写。页面不再自己存东西，
+// 所以换浏览器、清缓存都不影响，也会跟着 backup 一起被备份。
+let todos = [];
+
+function todoSetWarn(msg){
+  todoWarn.hidden = !msg;
+  todoWarn.textContent = msg || '';
+}
+
+function todoApply(list){
+  todos = list || [];
+  renderTodos();
+}
+
+async function todoCall(body){
+  if (MODE !== 'server') {
+    todoSetWarn('静态导出的页面是只读的，TODO 需要跑 serve 才有。');
+    return null;
+  }
+  try {
+    const res = await api('/api/todos', body);
+    todoApply(res.todos);
+    todoSetWarn(res.message || (res.changed ? '' : '没有变化'));
+    return res;
+  } catch (e) {
+    todoSetWarn('操作失败：' + e.message);
+    return null;
+  }
+}
+
+async function todoLoad(){
+  if (MODE !== 'server') return;
+  try {
+    const res = await api('/api/todos');
+    todoApply(res.todos);
+  } catch (e) {
+    todoWarn.hidden = false;
+    todoWarn.textContent = '读取 TODO 失败：' + e.message;
+  }
+}
+
+function todoItemNode(t){
+  const row = document.createElement('div');
+  row.className = 'todoItem' + (t.done ? ' done' : '');
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = !!t.done;
+  cb.title = t.done ? '标记为未完成' : '标记为已完成';
+  cb.onchange = () => todoCall({ action: 'toggle', id: t.id });
+
+  const body = document.createElement('div');
+  body.className = 'todoBody';
+
+  const title = document.createElement('div');
+  title.className = 'todoTitle';
+  if (t.kind === 'url') {
+    const a = document.createElement('a');
+    a.href = t.url; a.target = '_blank'; a.rel = 'noreferrer noopener';
+    a.textContent = t.text || t.title || t.url;
+    title.appendChild(a);
+  } else {
+    title.textContent = t.text;
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'todoMeta';
+  if (t.tag) {
+    const tag = document.createElement('span');
+    tag.className = 'todoTag';
+    tag.textContent = t.tag;
+    meta.appendChild(tag);
+  }
+  const bits = [t.created ? t.created.slice(0, 16).replace('T', ' ') : ''];
+  if (t.kind === 'url' && t.title && t.text && t.text !== t.title) bits.push(t.title);
+  meta.appendChild(document.createTextNode(bits.filter(Boolean).join(' · ')));
+
+  body.append(title, meta);
+
+  const ctl = document.createElement('div');
+  ctl.className = 'ctl';
+  const edit = document.createElement('button');
+  edit.type = 'button'; edit.textContent = '编辑';
+  const del = document.createElement('button');
+  del.type = 'button'; del.textContent = '×'; del.title = '删除';
+
+  // 就地编辑：文字/备注 + 标签
+  edit.onclick = () => {
+    if (body.querySelector('.todoEdit')) return;
+    const box = document.createElement('div');
+    box.className = 'todoEdit';
+    const eText = document.createElement('input');
+    eText.className = 'eText';
+    eText.value = t.text;
+    eText.placeholder = '备注 / 正文';
+    const eTag = document.createElement('input');
+    eTag.className = 'eTag';
+    eTag.value = t.tag;
+    eTag.placeholder = '标签';
+    const eOk = document.createElement('button');
+    eOk.type = 'button'; eOk.textContent = '保存';
+    const eNo = document.createElement('button');
+    eNo.type = 'button'; eNo.textContent = '取消';
+    const apply = () => todoCall({ action: 'update', id: t.id,
+                                   patch: { text: eText.value.trim(),
+                                            tag: eTag.value.trim() } });
+    const cancel = () => box.remove();
+    eOk.onclick = apply;
+    eNo.onclick = cancel;
+    eText.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') apply();
+      if (ev.key === 'Escape') cancel();
+    });
+    eTag.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') apply();
+      if (ev.key === 'Escape') cancel();
+    });
+    box.append(eText, eTag, eOk, eNo);
+    body.appendChild(box);
+    eText.focus();
+  };
+  del.onclick = () => todoCall({ action: 'remove', id: t.id });
+
+  ctl.append(edit, del);
+  row.append(cb, body, ctl);
+  return row;
+}
+
+function renderTodos(){
+  const counts = todoCounts(todos);
+  todoBadge.textContent = counts.open ? String(counts.open) : '';
+  todoStat.textContent = counts.total
+    ? `${counts.open} 条未完成 / 共 ${counts.total} 条`
+    : '还没有任何 TODO';
+
+  // 标签提示
+  todoTagList.innerHTML = '';
+  for (const tag of todoTags(todos)) {
+    const o = document.createElement('option');
+    o.value = tag;
+    todoTagList.appendChild(o);
+  }
+
+  const list = todoFilter(todos, state.todoFilter);
+  todoList.innerHTML = '';
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'todoEmpty';
+    empty.textContent = state.todoFilter === 'done'
+      ? '还没有已完成的条目。'
+      : '还没有 TODO。可以在「列表」里点某一行的 ＋ 加入，也可以在上面直接写。';
+    todoList.appendChild(empty);
+  } else {
+    for (const t of list) todoList.appendChild(todoItemNode(t));
+  }
+
+  if (MODE !== 'server') {
+    todoSetWarn('这是静态导出的只读快照。要让 TODO 能保存并跟着归档库一起备份，'
+                + '请用：python history_archive.py serve');
+  }
+}
+
+// 从历史记录行加入 TODO
+function addRowToTodo(r, btn){
+  btn.textContent = '…';
+  todoCall({ action: 'add', item: {
+    kind: 'url', url: r[5], title: r[4] || '', text: r[4] || r[5], tag: state.todoTag,
+  } }).then(res => {
+    const ok = res && res.changed;
+    btn.textContent = ok ? '✓' : '已在';
+    btn.classList.add('on');
+    setTimeout(() => { btn.textContent = '＋'; btn.classList.remove('on'); }, 1200);
+  });
+}
+
+function addTodoFromInput(){
+  const text = todoText.value.trim();
+  const tag = todoTag.value.trim();
+  if (!text) { todoSetWarn('内容不能为空。'); return; }
+  const url = /^https?:\/\/\S+$/i.test(text) ? text : '';
+  state.todoTag = tag;
+  todoText.value = '';
+  todoCall({ action: 'add', item: {
+    kind: url ? 'url' : 'text', text: text, url: url, tag: tag, title: '',
+  } }).then(res => {
+    if (res && res.changed) todoText.focus();
+  });
+}
+
+todoAddBtn.addEventListener('click', addTodoFromInput);
+todoText.addEventListener('keydown', (e) => { if (e.key === 'Enter') addTodoFromInput(); });
+todoTag.addEventListener('keydown', (e) => { if (e.key === 'Enter') addTodoFromInput(); });
+todoTag.addEventListener('change', () => { state.todoTag = todoTag.value.trim(); });
+
+todoFilterEl.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  state.todoFilter = b.dataset.filter;
+  for (const x of todoFilterEl.querySelectorAll('button')) x.classList.toggle('on', x === b);
+  renderTodos();
+});
+
+todoClearDone.addEventListener('click', () => {
+  const n = todoCounts(todos).done;
+  if (!n) { todoSetWarn('没有已完成的条目。'); return; }
+  if (!confirm('确定删除 ' + n + ' 条已完成的 TODO？')) return;
+  todoCall({ action: 'clear_done' });
+});
+
+todoExport.addEventListener('click', () => {
+  const blob = new Blob([todoToJSON(todos)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'todos.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+
+todoImport.addEventListener('click', () => todoFile.click());
+todoFile.addEventListener('change', () => {
+  const f = todoFile.files && todoFile.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const parsed = todoFromJSON(String(reader.result));
+    if (!parsed.ok) { todoSetWarn('导入失败：' + parsed.error); return; }
+    todoCall({ action: 'import', items: parsed.items }).then(res => {
+      if (res && parsed.skipped) {
+        todoSetWarn((res.message || '') + `，另有 ${parsed.skipped} 条格式不对被跳过`);
+      }
+    });
+  };
+  reader.readAsText(f);
+  todoFile.value = '';
+});
+
+function setView(view){
+  state.view = view;
+  for (const b of viewToggle.querySelectorAll('button')) {
+    b.classList.toggle('on', b.dataset.view === view);
+  }
+  listView.hidden = view !== 'list';
+  cloudView.hidden = view !== 'cloud';
+  todoView.hidden = view !== 'todo';
+  cloudTip.style.opacity = '0';
+  update();
+}
+
+viewToggle.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b) setView(b.dataset.view);
+});
+srcToggle.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  state.cloudSource = b.dataset.src;
+  for (const x of srcToggle.querySelectorAll('button')) x.classList.toggle('on', x === b);
+  renderCloud();
+});
+cloudTop.addEventListener('change', () => {
+  state.cloudTop = parseInt(cloudTop.value, 10) || 100;
+  renderCloud();
+});
+cloudRedraw.addEventListener('click', () => {
+  state.cloudPhase = Math.random() * Math.PI * 2;   // 换个螺旋起点重排
+  renderCloud();
+});
+
+moreBtn.addEventListener('click', renderMore);
+
+// 顶部筛选栏的高度会随条件行、标签行出现而变化，表头 sticky 的偏移量得跟着更新，
+// 否则滚动时列标题会被顶部栏盖住。
+function syncHeaderHeight(){
+  const h = document.querySelector('header');
+  if (!h) return;
+  // 减去边框，让表头严丝合缝贴在筛选栏下沿
+  const px = Math.max(0, h.getBoundingClientRect().height - 1);
+  document.documentElement.style.setProperty('--headh', px + 'px');
+}
+window.addEventListener('resize', () => {
+  syncHeaderHeight();
+  if (state.view === 'cloud') scheduleCloud();
+});
+
+// 启动：先把数据弄到手，再初始化界面
+async function boot(){
+  if (MODE !== 'server') {
+    DATA = EMBEDDED || [];
+    document.getElementById('refreshBtn').hidden = true;
+    initUI();
+    readStateFromUI();
+    update();
+    renderTodos();
+    return;
+  }
+  try {
+    await reloadRows(false);
+  } catch (e) {
+    document.body.insertAdjacentHTML('afterbegin',
+      '<div class="err" style="margin:16px 20px">读取归档数据失败：' + e.message + '</div>');
+    return;
+  }
+  initUI();
+  readStateFromUI();
+  update();
+  await todoLoad();
+}
+
+async function reloadRows(doSync){
+  const res = doSync ? await api('/api/sync', {}) : await api('/api/rows');
+  DATA = res.rows || [];
+  if (!DATA.length) return;
+  initUI();
+  update();
+  if (doSync) {
+    const meta = (await api('/api/meta')).meta;
+    totalEl.textContent = '共 ' + DATA.length.toLocaleString() + ' 条 · 数据范围 ' +
+      meta.first_day + ' ~ ' + meta.last_day;
+  }
+}
+
+refreshBtn.addEventListener('click', async () => {
+  const original = refreshBtn.textContent;
+  const doSync = refreshSync.checked;
+  refreshBtn.disabled = true;
+  refreshBtn.textContent = doSync ? '同步中…' : '刷新中…';
+  try {
+    await reloadRows(doSync);
+    refreshBtn.textContent = '已更新';
+  } catch (e) {
+    refreshBtn.textContent = '失败';
+    document.getElementById('err').hidden = false;
+    document.getElementById('err').textContent = '刷新失败：' + e.message;
+  }
+  setTimeout(() => {
+    refreshBtn.textContent = original;
+    refreshBtn.disabled = false;
+  }, 1200);
+});
+
+boot();
+</script>
+</body>
+</html>
